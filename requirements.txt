@@ -1,0 +1,46 @@
+# Core
+pyyaml>=6
+httpx>=0.27
+websockets>=13
+numpy>=1.26
+psutil>=5.9
+
+# Voice
+sounddevice>=0.4.7
+soundfile>=0.12
+faster-whisper>=1.1
+nvidia-cublas-cu12      # CUDA libs for faster-whisper on GPU
+nvidia-cudnn-cu12==9.*
+kokoro-onnx>=0.4        # natural English TTS (local)
+piper-tts>=1.3          # multilingual TTS (Polish etc.)
+pywin32>=306            # Windows SAPI voices fallback
+edge-tts>=7             # online neural voices (Polish: Marek, Zofia)
+
+# Your own voice (RVC). PyTorch must be the CUDA 12.8 build for RTX 50xx:
+#   pip install torch --index-url https://download.pytorch.org/whl/cu128
+torch>=2.7
+transformers>=4.40      # ContentVec (instead of fairseq)
+librosa>=0.10
+faiss-cpu>=1.8
+
+# Music sense / media control (Windows)
+PyAudioWPatch>=0.2.12
+winrt-runtime>=2.0
+winrt-Windows.Foundation>=2.0
+winrt-Windows.Foundation.Collections>=2.0
+winrt-Windows.Media.Control>=2.0
+pywinauto>=0.6.8
+winrt-Windows.Media.SpeechRecognition>=2.0   # "Windows speech" ears
+winrt-Windows.Globalization>=2.0
+winrt-Windows.Media.Ocr>=2.0                 # click_on: reading text on screen
+winrt-Windows.Graphics.Imaging>=2.0
+winrt-Windows.Storage.Streams>=2.0
+
+# Floating character + eyes
+PySide6>=6.7
+mss>=9
+pillow>=10
+
+# Web
+ddgs>=9
+trafilatura>=1.12

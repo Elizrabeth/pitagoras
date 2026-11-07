@@ -1,0 +1,20 @@
+# downloaded / generated (setup.ps1 and the installer get them again)
+.venv/
+__pycache__/
+*.pyc
+models/
+bin/
+logs/
+dist/
+*.part
+Pitagoras.exe
+
+# big models: never on GitHub
+brains/
+voices/
+
+# your own stuff: chat memory, menu choices, colors, personality
+memory/
+settings.yaml
+appearance.json
+personality.txt

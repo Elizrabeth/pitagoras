@@ -1,0 +1,149 @@
+"""Eyes: screenshots for vision-capable brains.
+
+Modes (settings):  off  |  ask (only when the user asks)  |  auto:<minutes> (also glances by itself)
+"""
+from __future__ import annotations
+
+import base64
+import io
+
+from .tools import ctx, tool
+
+MAX_W = 1280
+GRID = 100  # grid spacing (screenshot pixels) when Pitagoras controls the PC
+GRID_NOTE = (" This shows the active window ({w}x{h} px). Pink grid lines every {g} px; each crossing is labelled "
+             "'x,y'. To click something, find the nearest labels and estimate the x,y of its CENTER (aim for the "
+             "middle of the button/icon, never its edge). "
+             "Then DO it: your next output must be the tool call (click / press_keys / type_text), not a description.")
+
+# where the last screenshot came from, so clicks at screenshot (x, y) land on the right screen pixel
+LAST = {"left": 0, "top": 0, "scale": 1.0, "w": 0, "h": 0}
+
+
+def active_window_rect() -> dict | None:
+    """Screen rectangle of the window you're using (not Pitagoras, not the desktop/taskbar)."""
+    import ctypes
+    from ctypes import wintypes
+
+    import psutil
+
+    from .config import ROOT
+
+    user32 = ctypes.windll.user32
+
+    def ours(hwnd) -> bool:  # Pitagoras' own windows (character, bubble, chat box)
+        pid = wintypes.DWORD()
+        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+        try:
+            return str(psutil.Process(pid.value).exe()).lower().startswith(str(ROOT).lower())
+        except Exception:  # noqa: BLE001
+            return False
+
+    h = user32.GetForegroundWindow()
+    for _ in range(50):  # skip our own windows: take the next window down
+        if not h or not (ours(h) or not user32.IsWindowVisible(h)):
+            break
+        h = user32.GetWindow(h, 2)  # GW_HWNDNEXT
+    if not h:
+        return None
+    buf = ctypes.create_unicode_buffer(256)
+    user32.GetClassNameW(h, buf, 256)
+    if buf.value in ("Progman", "WorkerW", "Shell_TrayWnd"):
+        return None
+    r = wintypes.RECT()
+    if ctypes.windll.dwmapi.DwmGetWindowAttribute(h, 9, ctypes.byref(r), ctypes.sizeof(r)) != 0:  # without shadow
+        user32.GetWindowRect(h, ctypes.byref(r))
+    w, ht = r.right - r.left, r.bottom - r.top
+    if w < 80 or ht < 60:
+        return None
+    return {"left": r.left, "top": r.top, "width": w, "height": ht, "hwnd": h}
+
+
+def capture(point: tuple[int, int] | None = None, grid: bool = False, region: dict | None = None) -> str:
+    """JPEG of the monitor that contains `point` (the character), as base64.
+    region: capture just this screen rectangle instead (e.g. the active window, bigger and sharper).
+    grid=True draws a labelled coordinate grid (helps a vision model aim its clicks)."""
+    import mss
+    from PIL import Image
+
+    with mss.mss() as sct:
+        mons = sct.monitors[1:] or sct.monitors
+        mon = mons[0]
+        if point:
+            x, y = point
+            for m in mons:
+                if m["left"] <= x < m["left"] + m["width"] and m["top"] <= y < m["top"] + m["height"]:
+                    mon = m
+                    break
+        if region:
+            mon = {k: int(region[k]) for k in ("left", "top", "width", "height")}
+        shot = sct.grab(mon)
+    img = Image.frombytes("RGB", shot.size, shot.bgra, "raw", "BGRX")
+    # fit into MAX_W x 900 (small windows are enlarged up to 2x so their buttons are big enough to aim at)
+    scale = min(MAX_W / img.width, 900 / img.height, 2.0 if region else 1.0)
+    if abs(scale - 1) > 0.01:
+        img = img.resize((round(img.width * scale), round(img.height * scale)), Image.LANCZOS)
+    LAST.update(left=mon["left"], top=mon["top"], scale=scale, w=img.width, h=img.height)
+    if grid:
+        draw_grid(img)
+    buf = io.BytesIO()
+    img.save(buf, "JPEG", quality=70)
+    return base64.b64encode(buf.getvalue()).decode()
+
+
+def capture_for_control(point=None) -> str:
+    """Screenshot for clicking: the active window (sharper) if there is one, else the whole screen; with grid."""
+    return capture(point, grid=True, region=active_window_rect())
+
+
+def draw_grid(img) -> None:
+    from PIL import ImageDraw, ImageFont
+
+    try:
+        font = ImageFont.truetype("arialbd.ttf", 15)
+    except OSError:
+        font = ImageFont.load_default()
+    d = ImageDraw.Draw(img, "RGBA")
+    for x in range(GRID, img.width, GRID):
+        d.line([(x, 0), (x, img.height)], fill=(255, 0, 255, 90), width=1)
+    for y in range(GRID, img.height, GRID):
+        d.line([(0, y), (img.width, y)], fill=(255, 0, 255, 90), width=1)
+    # labels at every crossing, on a dark box so they're readable on any background
+    for x in range(GRID, img.width, GRID):
+        for y in range(GRID, img.height, GRID):
+            label = f"{x},{y}"
+            box = d.textbbox((x + 3, y + 2), label, font=font)
+            d.rectangle(box, fill=(0, 0, 0, 150))
+            d.text((x + 3, y + 2), label, fill=(255, 120, 255, 255), font=font)
+
+
+def to_screen(x: float, y: float) -> tuple[int, int]:
+    """Screenshot pixel -> real screen pixel."""
+    s = LAST["scale"] or 1.0
+    return round(LAST["left"] + x / s), round(LAST["top"] + y / s)
+
+
+def can_see() -> tuple[bool, str]:
+    agent = ctx.extra.get("agent")
+    if ctx.extra.get("eyes_mode", "ask") == "off":
+        return False, "Your eyes are turned off in the settings (right-click you > Eyes)."
+    if not agent or not agent.brain or not agent.brain.vision:
+        return False, ("You can't see: the current brain has no vision. A vision model is needed "
+                       "(e.g. a local brain with an mmproj file, a VLM in LM Studio, or Claude).")
+    return True, ""
+
+
+@tool("Look at the user's screen (takes a screenshot you can see). Use when they ask about what's on screen, "
+      "or before clicking/typing on the PC.",
+      focus="what to pay attention to (optional)",
+      grid="true to draw a coordinate grid for clicking (optional)")
+def look_at_screen(focus: str = "", grid: bool = False) -> dict | str:
+    ok, why = can_see()
+    if not ok:
+        return why
+    grid = grid if isinstance(grid, bool) else str(grid).lower() in ("true", "1", "yes")
+    img = capture_for_control(ctx.extra.get("char_pos")) if grid else capture(ctx.extra.get("char_pos"))
+    note = "Here is the user's screen right now." + (f" Focus on: {focus}" if focus else "")
+    if grid:
+        note += GRID_NOTE.format(w=LAST["w"], h=LAST["h"], g=GRID)
+    return {"text": note, "image": img}

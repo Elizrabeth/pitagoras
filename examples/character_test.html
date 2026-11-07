@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pitagoras event monitor</title>
+<style>
+  :root { --bg:#111418; --panel:#1b2027; --text:#e8ecf1; --muted:#8a94a3; --accent:#5ad19a; --beat:#ff5c8a; }
+  body { margin:0; font:14px/1.4 system-ui, sans-serif; background:var(--bg); color:var(--text); }
+  main { max-width:760px; margin:0 auto; padding:16px; display:grid; gap:12px; }
+  .panel { background:var(--panel); border-radius:10px; padding:12px 14px; }
+  .row { display:flex; gap:12px; align-items:center; flex-wrap:wrap; }
+  .label { color:var(--muted); width:110px; }
+  .bar { flex:1; min-width:120px; height:10px; background:#0003; border-radius:5px; overflow:hidden; }
+  .bar > i { display:block; height:100%; width:0; background:var(--accent); transition:width .05s linear; }
+  #face { width:90px; height:90px; border-radius:50%; background:#f2c14e; position:relative; transition:transform .08s; }
+  #mouth { position:absolute; left:30px; bottom:20px; width:30px; height:4px; background:#3a2a10; border-radius:8px; }
+  #log { height:220px; overflow:auto; font:12px/1.4 ui-monospace, monospace; color:var(--muted); white-space:pre-wrap; }
+  #reply { min-height:2.8em; }
+  input { flex:1; padding:8px; border-radius:6px; border:1px solid #333; background:#0005; color:var(--text); }
+  button { padding:8px 12px; border-radius:6px; border:0; background:var(--accent); color:#000; cursor:pointer; }
+</style>
+</head>
+<body>
+<main>
+  <div class="panel row">
+    <div id="face"><div id="mouth"></div></div>
+    <div>
+      <div><b id="state">disconnected</b> · emotion: <span id="emotion">-</span> · move: <span id="move">-</span></div>
+      <div id="np" style="color:var(--muted)">nothing playing</div>
+      <div id="reply"></div>
+    </div>
+  </div>
+  <div class="panel">
+    <div class="row"><span class="label">mouth</span><div class="bar"><i id="b-mouth"></i></div></div>
+    <div class="row"><span class="label">mic</span><div class="bar"><i id="b-mic"></i></div></div>
+    <div class="row"><span class="label">music</span><div class="bar"><i id="b-music"></i></div></div>
+    <div class="row"><span class="label">bass</span><div class="bar"><i id="b-bass"></i></div><span id="bpm"></span></div>
+  </div>
+  <div class="panel row">
+    <input id="text" placeholder="Type to Pitagoras…">
+    <button id="send">Send</button><button id="stop">Interrupt</button>
+  </div>
+  <div class="panel" id="log"></div>
+</main>
+<script>
+const $ = id => document.getElementById(id);
+const bar = (id, v) => $(id).style.width = Math.round(Math.min(1, v || 0) * 100) + "%";
+const log = m => { const l = $("log"); l.textContent += m + "\n"; l.scrollTop = l.scrollHeight; };
+let ws;
+function connect() {
+  ws = new WebSocket("ws://127.0.0.1:8765");
+  ws.onopen = () => log("connected");
+  ws.onclose = () => { $("state").textContent = "disconnected"; setTimeout(connect, 1500); };
+  ws.onmessage = e => {
+    const m = JSON.parse(e.data);
+    switch (m.type) {
+      case "mouth": bar("b-mouth", m.level); $("mouth").style.height = (4 + m.level * 26) + "px"; return;
+      case "mic": bar("b-mic", m.level); return;
+      case "music":
+        bar("b-music", m.level); bar("b-bass", m.bass);
+        if (m.bpm) $("bpm").textContent = m.bpm + " bpm";
+        if (m.beat) { $("face").style.transform = "scale(1.12) rotate(4deg)"; setTimeout(() => $("face").style.transform = "", 90); }
+        return;
+      case "state": $("state").textContent = m.state; break;
+      case "emotion": $("emotion").textContent = m.emotion; break;
+      case "move": $("move").textContent = m.position; break;
+      case "now_playing": $("np").textContent = m.title ? `${m.status}: ${m.title} — ${m.artist}` : "nothing playing"; break;
+      case "assistant_start": $("reply").textContent = ""; break;
+      case "assistant_text": $("reply").textContent += m.delta; return;
+    }
+    log(JSON.stringify(m));
+  };
+}
+connect();
+const send = () => { const t = $("text").value.trim(); if (t) { ws.send(JSON.stringify({type: "say", text: t})); $("text").value = ""; } };
+$("send").onclick = send;
+$("text").onkeydown = e => { if (e.key === "Enter") send(); };
+$("stop").onclick = () => ws.send(JSON.stringify({type: "interrupt"}));
+</script>
+</body>
+</html>

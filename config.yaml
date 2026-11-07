@@ -1,0 +1,148 @@
+# ─────────────────────────────────────────────────────────────
+#  Pitagoras config
+# ─────────────────────────────────────────────────────────────
+name: Pitagoras
+# Other spellings the speech recognizer may produce for the name (for wake word)
+name_aliases: [pitagoras, pythagoras, pitagora, pitágoras]
+
+# ── BRAIN ────────────────────────────────────────────────────
+# Pick it from the character's right-click menu (saved in settings.yaml).
+#   local:<folder>    a model in brains\<folder>\  (.gguf, + mmproj*.gguf for vision)
+#   lmstudio:<model>  a model in LM Studio      ollama:<model>  a model in Ollama
+#   claude:haiku|sonnet|opus   the Claude Code CLI          custom   your own server
+brain:
+  selected: local:Gemma-4-E4B
+  lmstudio_url: http://localhost:1234/v1
+  ollama_url: http://localhost:11434/v1
+  custom:                       # any OpenAI-compatible server (KoboldCpp, vLLM, …)
+    base_url: ""
+    api_key: ""
+    model: ""
+    vision: false
+
+  gguf:                         # how local brains are run (override per brain in brains\<name>\brain.yaml)
+    server_exe: bin/llama.cpp/llama-server.exe   # setup.ps1 -WithLlamaCpp downloads it
+    port: 8089
+    gpu_layers: 999      # 999 = everything on the GPU
+    context: 8192
+    extra_args: []       # e.g. ["--flash-attn", "on"]
+    thinking: false      # true = let reasoning models "think" first (slower, can leave replies empty)
+
+  temperature: 0.7
+  max_tokens: 600
+  history_messages: 30   # how many past messages are remembered
+
+# ── VOICE ────────────────────────────────────────────────────
+voice:
+  ears: whisper:large-v3-turbo  # whisper:<tiny|base|small|medium|large-v3-turbo> | windows | off
+  muted: false              # true = reply in the speech bubble only
+  input_device: null        # null = default mic, or part of its name
+  output_device: null
+
+  stt_model: small          # tiny / base / small / medium / large-v3 / distil-large-v3
+  stt_device: cuda          # cuda / cpu
+  language: null            # null = auto detect, or "en", "pl", …
+  languages: [en, pl]       # when auto detecting: only pick from these (short phrases confuse it)
+  hotwords: "Hej Pitagoras, Pitagoras"   # what the live wake check expects (helps it spell the name)
+  # names Whisper should expect in your requests (add your games/apps; helps "odpal steama" etc.)
+  vocab: "Steam, Spotify, Discord, Riot Client, League of Legends, YouTube, Chrome"
+  silence_ms: 1200          # pause length that ends your sentence (lower = faster replies, but may cut you off)
+                            # (after "hej pitagoras" alone it waits up to 2.5 s; once the request is there, 0.9 s)
+  min_level: 0.012          # mic sensitivity floor (raise if it triggers on noise)
+
+  # Wake word: false = it answers everything it hears.
+  # true = it only listens to sentences with the wake phrase ("Hej Pitagoras, włącz muzykę").
+  # Saying just "Hej Pitagoras" makes it listen to your next sentence (8 s).
+  wake_word: true
+  wake_phrase: hej pitagoras  # "hey pitagoras", "hej pythagoras" also work
+  follow_ups: false           # true = after a spoken reply, answer up to 3 more without the phrase
+  follow_up_seconds: 20
+
+  # kokoro (local, English) / edge (online neural voices, great Polish) / fish (Fish Audio API)
+  # piper (local, many languages) / sapi (Windows voices)
+  tts_engine: kokoro
+  kokoro_voice: am_michael  # af_heart, af_bella, am_adam, am_michael, bf_emma, bm_george, …
+  kokoro_speed: 1.05
+  edge_voice: pl-PL-MarekNeural   # pl-PL-ZofiaNeural, en-US-AndrewMultilingualNeural, …
+  edge_rate: "+0%"                # speed, e.g. "+10%"
+  edge_auto_language: true        # English sentences use a matching English voice
+  fish_api_key: ""                # fish.audio API key (or set FISH_API_KEY)
+  fish_voice_id: ""               # a fish.audio voice/model ID (your clone there), empty = default
+  fish_model: s1
+
+  # The base voice, before your voice model (Voice > Speed / Pitch / Volume)
+  tts_speed: 1.0            # 0.5 … 2.0
+  tts_pitch: 0              # semitones, -12 … +12
+  volume: 100               # %, applied last (after the voice model)
+
+  # Your own voice: an RVC model in voices\<name>\ (.pth + .index). The voice above
+  # speaks, then RVC turns it into yours. Pick it in Voice > My voice.
+  rvc_model: ""
+  rvc_pitch: 0              # semitones: -12 if the base voice is female and the model male, +12 the other way
+  rvc_index_rate: 0.5       # 0..1: how strongly to pull toward the model's training voice
+  rvc_protect: 0.33         # protect breaths/consonants (0.5 = off)
+  rvc_device: cuda
+  piper_model: models/piper/pl_PL-darkman-medium.onnx
+  sapi_voice: ""            # part of a Windows voice name, e.g. "Paulina"
+
+# ── PC CONTROL (mouse & keyboard) ────────────────────────────
+# Pitagoras can click, type and press keys when you ask ("click play", "play FNAF").
+# Move the mouse yourself to take over: it stops right away.
+control:
+  enabled: true
+  max_steps: 40             # actions per request (each one takes a screenshot + a model step)
+
+# ── EYES (needs a brain with vision) ─────────────────────────
+eyes:
+  mode: ask                 # off | ask (only when you ask) | auto:<minutes> (comments on its own)
+
+# ── FLOATING CHARACTER ───────────────────────────────────────
+overlay:
+  enabled: true
+  size: 150                 # pixels
+
+# ── MUSIC SENSE (for vibing) ─────────────────────────────────
+music_sense:
+  enabled: true
+  now_playing_poll_seconds: 2
+
+# ── EVENTS (the character connects here) ─────────────────────
+events:
+  host: 127.0.0.1
+  port: 8765
+
+# ── SPOTIFY (optional) ───────────────────────────────────────
+# Not needed. If you add a free developer app's id/secret, song search is
+# more accurate (no Premium needed). Otherwise web search is used.
+spotify:
+  client_id: ""
+  client_secret: ""
+  exe_path: ""              # empty = auto (%APPDATA%\Spotify\Spotify.exe or Store app)
+
+# ── CHAT ─────────────────────────────────────────────────────
+chat:
+  length: medium            # short | medium | long  (how long replies are)
+  task_comments: false      # false = after opening an app / playing music / clicking: just "Robi się!", no chatter
+  user_name: ""             # how it calls you (Settings > Preferences)
+  fact_check: true          # questions are searched online first; if the web disagrees with the brain, the web wins
+
+# ── MEMORY ───────────────────────────────────────────────────
+# The chat is saved to memory/conversation.json and read again at boot.
+# Facts it's asked to remember go to memory/notes.txt (you can edit it).
+memory:
+  enabled: true
+  keep_messages: 200        # how much of the chat is kept in the file
+
+# ── WATCH ALONG ──────────────────────────────────────────────
+watch:
+  chatter: normal           # quiet | normal | chatty  (how often it comments)
+  hear_audio: true          # transcribe what the video says (Whisper on the PC audio)
+
+# ── PERSONALITY ──────────────────────────────────────────────
+# The personality lives in personality.txt (menu > Personality > Edit).
+# This text is only the default used to create that file.
+persona: |
+  You are Pitagoras, a small animated character who lives on the user's desktop.
+  You are witty, warm and a little cheeky, and you love music.
+  You talk out loud, so write the way people speak: no markdown, no lists, no emoji.
+  Answer in the language the user speaks.
