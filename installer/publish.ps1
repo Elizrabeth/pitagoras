@@ -25,8 +25,8 @@ if (-not (Test-Path $installer)) { throw "$installer is missing: run .\installer
 if ($LASTEXITCODE -ne 0) { & $git commit -q -m "Pitagoras $Version" }
 
 if ($Create) {
-    & $gh repo view "$login/$Repo" --json name 2>$null | Out-Null
-    if ($LASTEXITCODE -eq 0) { throw "github.com/$login/$Repo already exists: not touching it" }
+    $mine = & $gh repo list $login --limit 1000 --json name --jq '.[].name'
+    if ($mine -contains $Repo) { throw "github.com/$login/$Repo already exists: not touching it" }
     & $gh repo create $Repo --public --source . --remote origin --push `
         --description "A desktop AI companion: a little yellow ball that listens, talks, sees your screen, plays music and dances."
     & $gh repo edit "$login/$Repo" --add-topic "ai-assistant,desktop-assistant,voice-assistant,llm,llama-cpp,whisper,windows"
