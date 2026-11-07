@@ -41,6 +41,20 @@ def appearance_path():
     return ROOT / "appearance.json"
 
 
+def overlay_store() -> QSettings:
+    """Where it remembers its spot etc.: overlay.ini in the Pitagoras folder (not the registry),
+    so everything stays in one folder. Older versions used the registry: copied over once."""
+    from .config import ROOT
+
+    store = QSettings(str(ROOT / "overlay.ini"), QSettings.IniFormat)
+    if not store.allKeys():
+        old = QSettings("Pitagoras", "overlay")
+        for k in old.allKeys():
+            store.setValue(k, old.value(k))
+        store.sync()
+    return store
+
+
 def parse_color(v) -> QColor | None:
     try:
         if isinstance(v, (list, tuple)) and len(v) >= 3:
@@ -314,7 +328,7 @@ class Character(QWidget):
         self._start = QPoint()
         self._dragged = False
 
-        self.store = QSettings("Pitagoras", "overlay")
+        self.store = overlay_store()
         self.wander = self.store.value("wander", True, type=bool)
         self.colors = load_colors()
         self.colors_mtime = self._appearance_mtime()

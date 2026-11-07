@@ -3,10 +3,14 @@
     .\setup.ps1                     venv + Python packages + Kokoro voice
     .\setup.ps1 -WithLlamaCpp       also download llama.cpp (llama-server.exe, CUDA build) for the "gguf" brain
     .\setup.ps1 -WithPiperPolish    also download a Polish Piper voice
-    .\setup.ps1 -WithBrain          also download a brain: Google's Gemma 4 E4B (4.9 GB + 0.9 GB vision)
-  The installer runs it with -FromInstaller (keeps the window open at the end).
+    .\setup.ps1 -Brain google       also download a brain: Google's Gemma 4 E4B (4.8 GB + 0.9 GB vision)
+    .\setup.ps1 -Brain uncensored   ... or HauhauCS' uncensored Gemma 4 E4B (5.0 GB + 0.9 GB vision)
+  The installer downloads the brain itself and runs this with -FromInstaller (keeps the window open on errors).
+  Everything goes into this folder: Python, packages, models and caches.
 #>
-param([switch]$WithLlamaCpp, [switch]$WithPiperPolish, [switch]$WithBrain, [switch]$FromInstaller)
+param([switch]$WithLlamaCpp, [switch]$WithPiperPolish, [ValidateSet("", "google", "uncensored")][string]$Brain = "",
+      [switch]$WithBrain, [switch]$FromInstaller)
+if ($WithBrain -and -not $Brain) { $Brain = "google" }
 $ErrorActionPreference = "Stop"
 Set-Location $PSScriptRoot
 $ProgressPreference = "SilentlyContinue"
@@ -19,17 +23,12 @@ trap {
     exit 1
 }
 
-function Find-Python312 {
-    $py = Get-Command py -ErrorAction SilentlyContinue
-    if ($py) {
-        $exe = (& py -3.12 -c "import sys; print(sys.executable)" 2>$null)
-        if ($LASTEXITCODE -eq 0 -and $exe) { return $exe.Trim() }
-    }
-    foreach ($p in "$env:LOCALAPPDATA\Programs\Python\Python312\python.exe", "$env:ProgramFiles\Python312\python.exe") {
-        if (Test-Path $p) { return $p }
-    }
-    return $null
-}
+# Everything stays in this folder: a portable Python in .\python (nothing installed on the system),
+# no pip cache, and downloaded models in .\models
+$env:PIP_NO_CACHE_DIR = "1"
+$env:HF_HOME = "$PSScriptRoot\models\huggingface"
+$PortablePython = "https://github.com/astral-sh/python-build-standalone/releases/download/20261026/" +
+                  "cpython-3.12.16%2B20261026-x86_64-pc-windows-msvc-install_only.tar.gz"
 
 function Get-File($url, $dest) {
     if (Test-Path $dest) { Write-Host "  have $dest"; return }
@@ -40,15 +39,15 @@ function Get-File($url, $dest) {
 }
 
 if (-not (Test-Path .venv\Scripts\python.exe)) {
-    $python = Find-Python312
-    if (-not $python) {
-        Write-Host "Python 3.12 isn't installed: installing it (just for you, no admin needed)..."
-        $inst = Join-Path $env:TEMP "python-3.12.10-amd64.exe"
-        Invoke-WebRequest "https://www.python.org/ftp/python/3.12.10/python-3.12.10-amd64.exe" -OutFile $inst
-        Start-Process $inst -ArgumentList "/quiet", "InstallAllUsers=0", "PrependPath=0", "Include_launcher=1", "Include_test=0" -Wait
-        Remove-Item $inst -ErrorAction SilentlyContinue
-        $python = Find-Python312
-        if (-not $python) { throw "Python 3.12 could not be installed. Install it from python.org and run setup again." }
+    $python = "$PSScriptRoot\python\python.exe"
+    if (-not (Test-Path $python)) {
+        Write-Host "Getting a portable Python 3.12 (into this folder, nothing is installed on the system)..."
+        $tgz = "$PSScriptRoot\python.tar.gz"
+        Get-File $PortablePython $tgz
+        tar -xzf $tgz -C $PSScriptRoot   # the archive holds a "python" folder
+        if ($LASTEXITCODE -ne 0) { throw "could not unpack Python" }
+        Remove-Item $tgz
+        if (-not (Test-Path $python)) { throw "Python wasn't unpacked to $python" }
     }
     Write-Host "Creating venv (Python 3.12: $python)..."
     & $python -m venv .venv
@@ -99,11 +98,18 @@ if ($WithLlamaCpp) {
     Write-Host "  llama.cpp $($rel.tag_name) (CUDA $cuda) -> $dir"
 }
 
-if ($WithBrain) {
-    Write-Host "Brain: Gemma 4 E4B by Google (4.9 GB + 0.9 GB to see the screen)..."
-    $g = "https://huggingface.co/google/gemma-4-E4B-it-qat-q4_0-gguf/resolve/main"
+if ($Brain) {
+    if ($Brain -eq "google") {
+        Write-Host "Brain: Gemma 4 E4B by Google (4.8 GB + 0.9 GB to see the screen)..."
+        $g = "https://huggingface.co/google/gemma-4-E4B-it-qat-q4_0-gguf/resolve/main"
+        $files = "gemma-4-E4B_q4_0-it.gguf", "gemma-4-E4B-it-mmproj.gguf"
+    } else {
+        Write-Host "Brain: Gemma 4 E4B Uncensored by HauhauCS (5.0 GB + 0.9 GB to see the screen)..."
+        $g = "https://huggingface.co/HauhauCS/Gemma-4-E4B-Uncensored-HauhauCS-Aggressive/resolve/main"
+        $files = "Gemma-4-E4B-Uncensored-HauhauCS-Aggressive-Q4_K_M.gguf", "mmproj-Gemma-4-E4B-Uncensored-HauhauCS-Aggressive-f16.gguf"
+    }
     Write-Host "  (big download: Windows' downloader shows the progress)"
-    foreach ($f in "gemma-4-E4B_q4_0-it.gguf", "gemma-4-E4B-it-mmproj.gguf") {
+    foreach ($f in $files) {
         $dest = "brains\Gemma-4-E4B\$f"
         if (Test-Path $dest) { Write-Host "  have $dest"; continue }
         New-Item -ItemType Directory -Force (Split-Path $dest) | Out-Null

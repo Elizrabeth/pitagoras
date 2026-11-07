@@ -1,5 +1,6 @@
 # downloaded / generated (setup.ps1 and the installer get them again)
 .venv/
+python/
 __pycache__/
 *.pyc
 models/
@@ -18,3 +19,4 @@ memory/
 settings.yaml
 appearance.json
 personality.txt
+overlay.ini

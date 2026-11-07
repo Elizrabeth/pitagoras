@@ -16,11 +16,16 @@ Windows media session ─► now playing ─────────────
 
 **Download `Pitagoras-Setup-x.y.z.exe` from [Releases](../../releases/latest) and run it.**
 
-- Pick any folder (Browse… → Make New Folder). It installs just for you, so no admin is needed.
-- Tick what to download: a brain (Google's Gemma 4 E4B, 5.9 GB), llama.cpp to run it, and a Polish offline voice.
-- After copying, a setup window installs Python 3.12 (if you don't have it) and the packages. This is about 8 GB
-  with CUDA PyTorch, so give it a while.
-- Start it from the desktop / Start menu shortcut.
+- Pick any folder (default `C:\Pitagoras`; Browse… → Make New Folder). **Everything goes into that folder**: its
+  own portable Python, the packages, models, caches, memory and settings. Nothing is installed on the system or
+  put in AppData. No admin is needed.
+- Pick a brain to download right in the installer (with a progress bar): **Gemma 4 E4B by Google** (official) or
+  **Gemma 4 E4B Uncensored by HauhauCS**, or none (use LM Studio / Ollama / Claude later). Also llama.cpp to run it,
+  and a Polish offline voice.
+- After copying, a setup window sets up Python and the packages. This is about 8 GB with CUDA PyTorch, so give it
+  a while.
+- Start it from the desktop / Start menu shortcut (both optional).
+- Uninstalling removes the program; it asks before deleting your brains, voices, memory and settings.
 
 **Needs:** Windows 10/11 x64, ~15 GB free, and an NVIDIA GPU (RTX, 8 GB+ VRAM recommended) for local brains, Whisper ears and voice
 models. Without one, use a brain from LM Studio / Ollama / Claude and expect slower ears.
@@ -31,12 +36,15 @@ Windows SmartScreen may warn about the installer because it isn't code-signed: *
 
 ```powershell
 git clone <this repo> ; cd pitagoras
-.\setup.ps1 -WithLlamaCpp -WithBrain   # venv (Python 3.12), packages, Kokoro voice, llama.cpp (CUDA), Gemma 4 E4B
+.\setup.ps1 -WithLlamaCpp -Brain google   # portable Python 3.12 + venv, packages, Kokoro voice, llama.cpp (CUDA),
+                                          # Gemma 4 E4B (or -Brain uncensored)
 .\launcher\build.ps1                   # builds Pitagoras.exe
 .\Pitagoras.exe                        # or: .\.venv\Scripts\python.exe run.py
 ```
 
-`.\installer\build.ps1 -Version 1.0.0` builds the installer into `dist\` (needs Inno Setup 6).
+`.\installer\build.ps1 -Version 1.0.0` builds the installer into `dist\` (needs Inno Setup 6.4+). Add
+`-Personality my_personality.txt` to make that personality the default (builds `...-personal.exe`, which
+`publish.ps1` never uploads).
 
 ## Using it
 

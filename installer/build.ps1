@@ -1,5 +1,7 @@
 # Builds dist\Pitagoras-Setup-<version>.exe:  .\installer\build.ps1 -Version 1.0.0
-param([string]$Version = "1.0.0", [string]$Publisher = "", [string]$RepoUrl = "")
+#   -Personality personality.txt   bundle that personality as the default (the file is named ...-personal.exe,
+#                                  and publish.ps1 never uploads it)
+param([string]$Version = "1.0.0", [string]$Publisher = "", [string]$RepoUrl = "", [string]$Personality = "")
 $ErrorActionPreference = "Stop"
 $root = Split-Path $PSScriptRoot -Parent
 
@@ -12,6 +14,12 @@ if (-not $iscc) { throw "Inno Setup 6 isn't installed (winget install JRSoftware
 $defs = @("/DAppVersion=$Version")
 if ($Publisher) { $defs += "/DPublisher=$Publisher" }
 if ($RepoUrl) { $defs += "/DRepoUrl=$RepoUrl" }
+$suffix = ""
+if ($Personality) {
+    $p = (Resolve-Path $Personality).Path
+    $suffix = "-personal"
+    $defs += "/DPersonality=$p", "/DSuffix=$suffix"
+}
 & $iscc /Q @defs "$PSScriptRoot\Pitagoras.iss"
 if ($LASTEXITCODE -ne 0) { throw "installer build failed" }
-Get-Item "$root\dist\Pitagoras-Setup-$Version.exe" | ForEach-Object { "built $($_.FullName) ($([math]::Round($_.Length/1MB,1)) MB)" }
+Get-Item "$root\dist\Pitagoras-Setup-$Version$suffix.exe" | ForEach-Object { "built $($_.FullName) ($([math]::Round($_.Length/1MB,1)) MB)" }
