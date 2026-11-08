@@ -388,8 +388,12 @@ def _score(want: str, have: str) -> float:
 # UI Automation control types: what can be clicked, and plain text (for finding labels)
 UIA_CLICKABLE = {50005: "Hyperlink", 50000: "Button", 50007: "ListItem", 50011: "MenuItem", 50019: "TabItem",
                  50013: "RadioButton", 50002: "CheckBox", 50031: "SplitButton", 50003: "ComboBox", 50024: "TreeItem",
-                 50029: "DataItem"}
+                 50029: "DataItem", 50004: "Edit"}
 UIA_TEXT = {50020: "Text", 50006: "Image"}
+# text boxes: websites name them by their label / aria-label / placeholder ("Search", "E-mail", "Szukaj")
+UIA_FIELD = 50004
+BROWSER_BARS = {"addressandsearchbar", "paseknawigacyjny", "paseknawigacyjnyiwyszukiwania", "searchgoogleortypeaurl",
+                "addressbar", "paskadresu", "pasekadresuiwyszukiwania"}
 WINDOW_CHROME = {"minimize", "maximize", "restore", "close", "system", "minimalizuj", "maksymalizuj", "przywróć",
                  "zamknij", "go back", "go forward", "back", "forward", "reload", "wstecz", "dalej", "odśwież"}
 _UIA: dict = {}
@@ -406,7 +410,7 @@ def _uia_conds():
             return iu.CreateAndCondition(iu.CreateOrConditionFromArray(
                 [iu.CreatePropertyCondition(30003, t) for t in types]), onscreen)
 
-        _UIA.update(iu=iu, click=of(UIA_CLICKABLE), all=of({**UIA_CLICKABLE, **UIA_TEXT}))
+        _UIA.update(iu=iu, click=of(UIA_CLICKABLE), all=of({**UIA_CLICKABLE, **UIA_TEXT}), field=of({UIA_FIELD: 1}))
     return _UIA
 
 
@@ -443,7 +447,7 @@ def screen_items(hwnd: int, box: dict, text_too: bool = False, limit: int = 0, p
             kind = types.get(e.CurrentControlType, "")
             if kind in UIA_TEXT.values() and len(name) < 3:
                 continue
-            key = (name.lower(), kind in UIA_CLICKABLE.values())
+            key = (name.lower(), kind in UIA_CLICKABLE.values(), kind == "Edit")  # a "Search" box AND button
             if key in seen:
                 continue
             seen.add(key)
@@ -455,17 +459,62 @@ def screen_items(hwnd: int, box: dict, text_too: bool = False, limit: int = 0, p
     return items[:limit] if limit else items
 
 
-def _uia_find(target: str, hwnd: int, box: dict) -> tuple[int, int, str] | None:
-    """A control in the window whose accessible name matches (buttons, links, tabs, icons…)."""
+def _uia_find(target: str, hwnd: int, box: dict, field: bool = False) -> tuple[int, int, str] | None:
+    """A control in the window whose accessible name matches (buttons, links, tabs, icons, text boxes…).
+    field=True (typing): a text box with that name wins over a label or button that says the same."""
     want = _fold(target)
     best = None
     for it in screen_items(hwnd, box, text_too=True):
-        s = _score(want, _fold(it["name"]))
+        name = _fold(it["name"])
+        if it["kind"] == "Edit" and name in BROWSER_BARS and want not in name:
+            continue  # the browser's address bar is not the page's search box
+        s = _score(want, name)
         if s < 0.5:
             continue
-        rank = (round(s, 3), it["clickable"], -len(it["name"]))
+        rank = (field and it["kind"] == "Edit", round(s, 3), it["clickable"], -len(it["name"]))
         if best is None or rank > best[0]:
             best = (rank, it["x"], it["y"], f"{it['kind']} '{it['name']}'")
+    return best[1:] if best else None
+
+
+def _fields(hwnd: int, box: dict) -> list[tuple[int, int, int, int]]:
+    """Visible text boxes in the window as (left, top, right, bottom), screen pixels."""
+    if not hwnd:
+        return []
+    u = _uia_conds()
+    arr = u["iu"].ElementFromHandle(hwnd).FindAll(4, u["field"])
+    x0, y0, x1, y1 = box["left"], box["top"], box["left"] + box["width"], box["top"] + box["height"]
+    out = []
+    for i in range(arr.Length):
+        try:
+            e = arr.GetElement(i)
+            r = e.CurrentBoundingRectangle
+            if r.right - r.left < 20 or r.bottom - r.top < 8 or not e.CurrentIsEnabled:
+                continue
+            if _fold(e.CurrentName or "") in BROWSER_BARS:
+                continue
+            cx, cy = (r.left + r.right) // 2, (r.top + r.bottom) // 2
+            if x0 <= cx <= x1 and y0 <= cy <= y1:
+                out.append((r.left, r.top, r.right, r.bottom))
+        except Exception:  # noqa: BLE001
+            continue
+    return out
+
+
+def _field_near(hwnd: int, box: dict, x: float, y: float) -> tuple[int, int] | None:
+    """The text box a label/placeholder at (x, y) belongs to: the one it's inside, else the closest one just
+    right of it or below it (labels sit left of or above their box). Returns where to click in the box."""
+    best = None
+    for left, top, right, bottom in _fields(hwnd, box):
+        if left <= x <= right and top <= y <= bottom:
+            return int(min(max(x, left + 8), right - 8)), (top + bottom) // 2  # placeholder: click right there
+        dx = max(left - x, 0, x - right)
+        dy = max(top - y, 0, y - bottom)
+        if x > right + 40 or y > bottom + 20:  # boxes come after their label, not before it
+            continue
+        d = (dx * dx + dy * dy) ** 0.5
+        if d <= 260 and (best is None or d < best[0]):
+            best = (d, (left + right) // 2, (top + bottom) // 2)
     return best[1:] if best else None
 
 
@@ -546,6 +595,42 @@ def _ocr_find(target: str, box: dict) -> tuple[int, int, str] | None:
     return best[1:] if best else None
 
 
+def _class_name(hwnd: int) -> str:
+    buf = ctypes.create_unicode_buffer(128)
+    user32.GetClassNameW(hwnd, buf, 128)
+    return buf.value
+
+
+def new_file_in_notepad(wait_open: bool = True) -> bool:
+    """Notepad reopens your old tabs, so typing right away would write into one of your files: bring Notepad to the
+    front and open a NEW tab (Ctrl+N). wait_open: it was just started, wait for its window; otherwise only when
+    Notepad is already the window in front. True = a new empty file is ready and focused."""
+    hwnd = 0
+    for _ in range(40 if wait_open else 1):
+        fg = user32.GetForegroundWindow()
+        if _class_name(fg) == "Notepad":
+            hwnd = fg
+            break
+        if wait_open:
+            hwnd = user32.FindWindowW("Notepad", None)
+            if hwnd and user32.IsWindowVisible(hwnd):
+                break
+            hwnd = 0
+        time.sleep(0.2)
+    if not hwnd:
+        return False
+    if user32.GetForegroundWindow() != hwnd:
+        if user32.IsIconic(hwnd):
+            user32.ShowWindow(hwnd, 9)  # SW_RESTORE
+        _send(_key(0x12, False), _key(0x12, True))  # an Alt tap lets us take the focus
+        user32.SetForegroundWindow(hwnd)
+        time.sleep(0.4)
+    time.sleep(0.6)  # (its tabs are still loading right after it starts)
+    _send(_key(0x11, False), _key(0x4E, False), _key(0x4E, True), _key(0x11, True))  # Ctrl+N
+    time.sleep(0.7)
+    return user32.GetForegroundWindow() == hwnd
+
+
 def _target_window() -> tuple[int, dict]:
     from ..eyes import active_window_rect
 
@@ -562,13 +647,16 @@ def _target_window() -> tuple[int, dict]:
       "x,y: prefer this whenever the thing has a label.",
       target="the text or name of what to click", double="true for a double click (optional)")
 @_guard
-def click_on(target: str, double: bool = False) -> dict | str:
+def click_on(target: str, double: bool = False, field: bool = False) -> dict | str:
     target = re.sub(r"^\s*▶\d*\s*", "", str(target)).strip()
+    field = field or bool(FIELD_RE.search(target))
+    if field:  # "search box" / "pole e-mail": the box is named "Search" / "E-mail"
+        target = FIELD_RE.sub(" ", target).strip() or target
     hwnd, box = _target_window()
     found = None
     if hwnd:
         try:
-            found = _uia_find(target, hwnd, box)
+            found = _uia_find(target, hwnd, box, field=field)
         except Exception as e:  # noqa: BLE001
             log.debug("ui automation failed: %s", e)
     if not found:
@@ -580,10 +668,24 @@ def click_on(target: str, double: bool = False) -> dict | str:
         return _after(f"Couldn't find '{target}' on the screen (it isn't there, or it's named differently). "
                       "Pick one of the exact names listed below, or click by x,y from the screenshot.", 0)
     x, y, what = found
+    if field and not what.startswith("Edit "):
+        # found the label or placeholder text, not the box: click the box it belongs to
+        try:
+            near = _field_near(hwnd, box, x, y) if hwnd else None
+        except Exception as e:  # noqa: BLE001
+            log.debug("finding the text box failed: %s", e)
+            near = None
+        if near:
+            x, y = near
+            what = f"the text box for {what}"
     _label(what.split("'")[1][:40] if "'" in what else "")
     _move(x, y)
     _press(*MOUSE["left"], double=_yes(double))
     return _after(f"Clicked {what}.")
+
+
+FIELD_RE = re.compile(r"\b(?:text ?box|search ?box|search ?bar|input|field|box|pole(?: tekstowe)?|polu|pola|"
+                      r"okienk\w*|pasek|pasku|wyszukiwark\w*)\b", re.I)
 
 
 def _yes(v) -> bool:
@@ -660,7 +762,7 @@ def scroll(amount: float = -3, x: float | None = None, y: float | None = None) -
 @_guard
 def type_text(text: str, into: str = "") -> dict | str:
     if into and str(into).strip():
-        res = click_on.__wrapped__(str(into))  # click the field first (same finder as click_on)
+        res = click_on.__wrapped__(str(into), field=True)  # click the box first (never just its label)
         said = res.get("text", "") if isinstance(res, dict) else str(res)
         if not said.startswith("Clicked"):
             return res  # couldn't find the field: tell the model (it can click by x,y instead)

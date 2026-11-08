@@ -135,6 +135,10 @@ class App:
             lang = (self.cfg.get("chat") or {}).get("language", "auto")
             self.speaker.fixed_lang = lang if lang in ("pl", "en") else None
 
+    def t(self, pl: str, en: str) -> str:
+        """A line it shows or says itself, in the chosen language (Settings > Language)."""
+        return self.agent.phrase(pl, en) if getattr(self, "agent", None) else (pl if guess_lang_pl(self.cfg) else en)
+
     def toast(self, text: str) -> None:
         log.info("%s", text)
         self.hub.emit("toast", text=text)
@@ -226,29 +230,32 @@ class App:
             if entry is None:
                 entry = next(iter(self.catalog), None)
                 if sel:
-                    self.toast(f"Brain '{sel}' not found" + (f", using {entry['label']}" if entry else ""))
+                    self.toast(self.t(f"Nie znalazłem mózgu '{sel}'" + (f", używam {entry['label']}" if entry else ""),
+                                      f"Brain '{sel}' not found" + (f", using {entry['label']}" if entry else "")))
             if entry is None:
                 self.brain_status = "none"
-                self.toast(f"No brain found. Put a model in {BRAINS_DIR}\\<name>\\ or start LM Studio/Ollama.")
+                self.toast(self.t(f"Nie mam mózgu. Wrzuć model do {BRAINS_DIR}\\<nazwa>\\ albo włącz LM Studio/Ollamę.",
+                              f"No brain found. Put a model in {BRAINS_DIR}\\<name>\\ or start LM Studio/Ollama."))
                 await self.push_settings()
                 return
             self.brain_status = "loading"
             self.hub.emit("state", state="loading")
-            self.toast(f"Loading brain: {entry['label']}…")
+            self.toast(self.t(f"Ładuję mózg: {entry['label']}…", f"Loading brain: {entry['label']}…"))
             try:
                 brain = build_brain(entry, self.cfg)
                 await brain.start()
             except Exception as e:  # noqa: BLE001
                 self.brain_status = f"error: {e}"
                 self.hub.emit("error", message=str(e))
-                self.toast(f"Brain failed: {e}")
+                self.toast(self.t(f"Mózg nie wystartował: {e}", f"Brain failed: {e}"))
                 self.hub.emit("state", state="idle")
                 await self.push_settings()
                 return
             self.agent.brain = brain
             self.brain_status = "ready"
             self.hub.emit("state", state="idle")
-            self.toast(f"Brain ready: {brain.label}" + (" (can see)" if brain.vision else ""))
+            self.toast(self.t(f"Mózg gotowy: {brain.label}" + (" (widzi ekran)" if brain.vision else ""),
+                              f"Brain ready: {brain.label}" + (" (can see)" if brain.vision else "")))
             await self.push_settings()
 
     # ── ears ─────────────────────────────────────────────────
@@ -272,7 +279,7 @@ class App:
                     from .voice.stt import Listener
 
                     size = spec.split(":", 1)[1] if ":" in spec else "small"
-                    self.toast(f"Loading ears: Whisper {size}…")
+                    self.toast(self.t(f"Ładuję uszy: Whisper {size}…", f"Loading ears: Whisper {size}…"))
                     lst = Listener(self.cfg.voice, self.agent.heard, self.hub.emit, size=size,
                                    wake_check=self.agent.wake_status, on_wake=self.agent.wake_feedback)
                 lst.start()
@@ -281,11 +288,12 @@ class App:
                     raise RuntimeError(lst.error)
             except Exception as e:  # noqa: BLE001
                 self.ears_status = f"error: {e}"
-                self.toast(f"Ears failed: {e}")
+                self.toast(self.t(f"Uszy nie działają: {e}", f"Ears failed: {e}"))
                 return
             self.listener = lst
             self.ears_status = "ready"
-            self.toast("Ears ready: " + ("Windows speech" if spec == "windows" else spec.replace(":", " ")))
+            self.toast(self.t("Uszy gotowe: ", "Ears ready: ")
+                       + ("Windows speech" if spec == "windows" else spec.replace(":", " ")))
 
     # ── eyes ─────────────────────────────────────────────────
     async def look(self, prompt: str = "Take a look at my screen. What do you think?") -> None:
@@ -294,11 +302,17 @@ class App:
         ok, why = can_see()
         if not ok:
             self.hub.emit("assistant_start")
-            self.agent._say(why.replace("You can't", "I can't").replace("your eyes", "my eyes").replace("You", "I"))
+            self.agent._say(self.t(
+                "Nie widzę ekranu: oczy są wyłączone w ustawieniach (prawy klik na mnie > Eyes)."
+                if "turned off" in why else
+                "Nie widzę ekranu: ten mózg nie ma wzroku. Potrzebny jest model z wizją (np. lokalny z plikiem mmproj).",
+                why.replace("You can't", "I can't").replace("your eyes", "my eyes").replace("You", "I")))
             self.hub.emit("assistant_end")
             if self.speaker:
                 self.speaker.flush()
             return
+        if prompt == "Take a look at my screen. What do you think?":
+            prompt = self.t("Zerknij na mój ekran. Co o tym myślisz?", prompt)
         img = await asyncio.to_thread(capture, tools.ctx.extra.get("char_pos"))
         await self.agent.submit(prompt, image=img)
 
@@ -321,9 +335,11 @@ class App:
     async def set_watch(self, on: bool) -> None:
         self.watcher.set(on)
         if on and not self.cfg.music_sense.get("enabled", True):
-            self.toast("Watching along (music sense is off in config.yaml, so I can't hear the video)")
+            self.toast(self.t("Oglądam z tobą (music sense jest wyłączony w config.yaml, więc nie słyszę filmu)",
+                              "Watching along (music sense is off in config.yaml, so I can't hear the video)"))
         else:
-            self.toast("Watching along with you 📺" if on else "Stopped watching along")
+            self.toast(self.t("Oglądam z tobą 📺" if on else "Koniec wspólnego oglądania",
+                              "Watching along with you 📺" if on else "Stopped watching along"))
         await self.push_settings()
 
     async def set_language(self, lang: str) -> None:
@@ -338,10 +354,11 @@ class App:
             try:
                 await asyncio.to_thread(self.speaker.reload, self.cfg.voice)
             except Exception as e:  # noqa: BLE001
-                self.toast(f"Voice failed: {e}")
-            self.toast(f"Language: {name} (voice: {self.voice_id().split(':', 1)[-1]})")
+                self.toast(self.t(f"Głos nie działa: {e}", f"Voice failed: {e}"))
+            self.toast(self.t(f"Język: {name} (głos: {self.voice_id().split(':', 1)[-1]})",
+                              f"Language: {name} (voice: {self.voice_id().split(':', 1)[-1]})"))
         else:
-            self.toast(f"Language: {name}")
+            self.toast(self.t(f"Język: {name}", f"Language: {name}"))
         if self.speaker and lang in ("pl", "en"):
             self.speaker.say("Dobra, od teraz mówię po polsku." if lang == "pl" else "Okay, I'll speak English from now on.")
         await self.push_settings()
@@ -362,22 +379,24 @@ class App:
             return
         if key == "rvc" and value:
             self.rvc_loading = True
-            self.toast(f"Loading voice model '{value}'… (the first time downloads ~550 MB)")
+            self.toast(self.t(f"Ładuję model głosu '{value}'… (za pierwszym razem pobiera ~550 MB)",
+                              f"Loading voice model '{value}'… (the first time downloads ~550 MB)"))
             await self.push_settings()
         try:
             await asyncio.to_thread(self.speaker.reload, self.cfg.voice)
         except Exception as e:  # noqa: BLE001
-            self.toast(f"Voice failed: {e}")
+            self.toast(self.t(f"Głos nie działa: {e}", f"Voice failed: {e}"))
         finally:
             self.rvc_loading = False
         sp = self.speaker
         if key == "rvc":
             if sp.rvc_error:
-                self.toast(f"Voice model failed: {sp.rvc_error[:150]}")
+                self.toast(self.t(f"Model głosu nie działa: {sp.rvc_error[:150]}", f"Voice model failed: {sp.rvc_error[:150]}"))
             else:
-                self.toast(f"Speaking with voice model '{value}'" if value else "Voice model off")
+                self.toast(self.t(f"Mówię modelem głosu '{value}'" if value else "Model głosu wyłączony",
+                                  f"Speaking with voice model '{value}'" if value else "Voice model off"))
         if not (key == "rvc" and sp.rvc_error):
-            sp.say("Cześć! Tak teraz brzmię." if guess_lang_pl(self.cfg) else "Hi! This is how I sound now.")
+            sp.say(self.t("Cześć! Tak teraz brzmię.", "Hi! This is how I sound now."))
         await self.push_settings()
 
     # ── commands from the character ──────────────────────────
@@ -397,13 +416,14 @@ class App:
             value = " ".join(str(value or "").split())
             if key == "wake_phrase":
                 if len(value.split()) < 1:
-                    self.toast("The wake phrase can't be empty.")
+                    self.toast(self.t("Fraza budząca nie może być pusta.", "The wake phrase can't be empty."))
                     return
                 save_setting("voice", "wake_phrase", value.lower())
-                self.toast(f"Now I listen for “{value}”")
+                self.toast(self.t(f"Teraz reaguję na „{value}”", f"Now I listen for “{value}”"))
             else:
                 save_setting("chat", "user_name", value)
-                self.toast(f"Okay, {value}!" if value else "Okay, I won't use a name for you.")
+                self.toast(self.t(f"Okej, {value}!" if value else "Okej, nie będę cię nazywał po imieniu.",
+                                  f"Okay, {value}!" if value else "Okay, I won't use a name for you."))
             self.reload_cfg()
             await self.push_settings()
             return
@@ -463,9 +483,9 @@ class App:
             try:
                 await asyncio.to_thread(self.speaker.reload, self.cfg.voice)
                 if key != "muted":
-                    self.speaker.say("Cześć! Tak teraz brzmię." if guess_lang_pl(self.cfg) else "How do I sound now?")
+                    self.speaker.say(self.t("Cześć! Tak teraz brzmię.", "How do I sound now?"))
             except Exception as e:  # noqa: BLE001
-                self.toast(f"Voice failed: {e}")
+                self.toast(self.t(f"Głos nie działa: {e}", f"Voice failed: {e}"))
         await self.push_settings()
 
     def register_handlers(self) -> None:
@@ -500,24 +520,26 @@ class App:
             self.agent.restored_at = None
             if m.get("all"):
                 memory.clear_all()
-                self.toast("All memory cleared: conversation and saved notes.")
+                self.toast(self.t("Wyczyściłem całą pamięć: rozmowę i zapisane notatki.",
+                                  "All memory cleared: conversation and saved notes."))
             else:
                 memory.clear_conversation()
-                self.toast("Forgot this conversation (saved notes kept).")
+                self.toast(self.t("Zapomniałem tę rozmowę (notatki zostały).", "Forgot this conversation (saved notes kept)."))
             await self.push_settings()
 
         async def edit_personality(_m):
             memory.personality(self.cfg.get("persona"))  # creates the file if missing
             memory.edit_file(memory.PERSONALITY)
-            self.toast("Editing personality.txt: save it and I'll use it from my next reply.")
+            self.toast(self.t("Edytujesz personality.txt: zapisz, a użyję go od następnej odpowiedzi.",
+                              "Editing personality.txt: save it and I'll use it from my next reply."))
 
         async def reset_personality(_m):
             memory.reset_personality(self.cfg.get("persona"))
-            self.toast("Personality reset to the default.")
+            self.toast(self.t("Przywróciłem domyślną osobowość.", "Personality reset to the default."))
 
         async def edit_notes(_m):
             memory.edit_file(memory.NOTES)
-            self.toast("Editing memory notes: one fact per line.")
+            self.toast(self.t("Edytujesz notatki pamięci: jeden fakt w linijce.", "Editing memory notes: one fact per line."))
 
         async def edit_words(_m):
             from .voice.stt import WORDS_HELP, words_file
@@ -526,7 +548,8 @@ class App:
             if not f.exists():
                 f.write_text(WORDS_HELP + "Xayah\nflashnął\n", encoding="utf-8")
             memory.edit_file(f)
-            self.toast("My words: one per line. The ears pick them up right away.")
+            self.toast(self.t("Moje słowa: jedno w linijce. Uszy łapią je od razu.",
+                              "My words: one per line. The ears pick them up right away."))
 
         async def open_voices(_m):
             from .voice.rvc import VOICES_DIR

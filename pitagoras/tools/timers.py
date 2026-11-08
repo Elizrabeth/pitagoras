@@ -41,9 +41,10 @@ async def _ring(tid: int) -> None:
     TIMERS.pop(tid, None)
     _emit()
     then = (t.get("then") or "").strip()
-    msg = t["message"] or ("" if then else f"{t['label']}: time's up!")
-    log.info("timer done: %s%s", t["label"], f" -> {then}" if then else "")
     agent = ctx.extra.get("agent")
+    up = agent.phrase("czas minął!", "time's up!") if agent else "czas minął!"
+    msg = t["message"] or ("" if then else f"{t['label']}: {up}")
+    log.info("timer done: %s%s", t["label"], f" -> {then}" if then else "")
     if agent is None:
         ctx.hub.emit("toast", text=msg or then)
         return

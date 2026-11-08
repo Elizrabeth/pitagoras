@@ -74,6 +74,9 @@ the result's number or URL.
 Discord ("napisz na discordzie na serwerze X na kanale Y: będę za 10 minut", "wyślij do Adama na discordzie że…")
 = ONE call: send_discord server=X channel=Y message="będę za 10 minut" (or to=Adam). The message word for word
 as the user said it (same language, no changes; the signature is added by itself). Never type_text for Discord.
+Typing text ("wpisz/wypisz/napisz tu …", "masz zaznaczone pole, wypisz swoje hobby") = ONE call type_text with the
+finished text and no into: it types where the cursor already is. Write the text yourself; don't say it out loud
+and don't click. "otwórz notatnik i napisz X" = open_app notepad, then type_text (a new empty file is opened for you).
 
 Tools:
 {tools}
@@ -490,6 +493,43 @@ ACTION_VERB_RE = re.compile(
     r"pokaż\w*|ustaw\w*|nastaw\w*|zatrzymaj\w*|wyłącz\w*|zamknij\w*|kliknij\w*|naciśnij\w*|wpisz\w*|przewiń\w*|"
     r"napisz\w*|zapisz\w*|wyślij\w*|skopiuj\w*|wklej\w*|pobierz\w*|zrób\w*|write|save|send|copy|paste|"
     r"open|play|launch|start|search|find|show|set|stop|close|click|press|type)\b", re.I)
+
+
+# ── typing requests ("masz zaznaczone pole, wypisz swoje hobby", "otwórz notatnik i napisz listę zakupów") ──
+TYPE_VERB_RE = re.compile(r"\b(wpisz\w*|wypisz\w*|wpisa[cć]|wypisa[cć]|napisz\w*|napisa[cć]|zapisz|pisz|wklep\w*|"
+                          r"wstukaj|type|write)\b", re.I)
+TYPE_STRONG_RE = re.compile(r"\b(wpisz\w*|wypisz\w*|wpisa[cć]|wypisa[cć]|wklep\w*|wstukaj|type)\b", re.I)
+TYPE_WHERE_RE = re.compile(r"\b(zaznaczon\w*|aktywn\w*|tutaj|tu|here|kursor\w*|pol[eua]|polu|okienk\w*|notatni\w*|"
+                           r"notepad|word\w*|dokument\w*|plik\w*|pasek|pasku|wyszukiwar\w*|w nim|w niego|w nią|w niej|"
+                          r"in it|text ?box|field|czat\w*|chat)\b", re.I)
+TYPE_FIELD_RE = re.compile(r"\b(pol[eua]|polu|okienk\w*|pasek|pasku|wyszukiwar\w*|text ?box|field|search)\b", re.I)
+TYPE_FOCUSED_RE = re.compile(r"\b(zaznaczon\w*|aktywn\w*|tutaj|tu|here|kursor\w*|w tym polu|w tym okienku)\b", re.I)
+TYPE_OPEN_RE = re.compile(r"\b(otw[oó]rz\w*|odpal\w*|uruchom\w*|włącz\w*|open|launch|start)\b", re.I)
+NOTEPAD_RE = re.compile(r"\b(notatni\w*|notepad)\b", re.I)
+NEW_FILE_RE = re.compile(r"\b(now(?:y|ym|ego) plik\w*|now(?:ą|a|ej) kart\w*|now(?:y|ym) dokument\w*|stw[oó]rz plik|"
+                         r"utw[oó]rz plik|new (?:file|tab|document))\b", re.I)
+# after typing, more to do ("…i naciśnij enter", "…i zapisz")
+TYPE_MORE_RE = re.compile(r"\b(enter\w*|wy[śs]lij|zatwierd[źz]|naci[śs]nij|wci[śs]nij|zapisz go|zapisz plik|"
+                          r"zapisz jako|i zapisz|send|press|save)\b", re.I)
+TYPE_BLOCKED = ("Not done: the user wants text TYPED {where}. Call type_text with text=<the finished text, written "
+                "by you in the user's language> and NO 'into'. Don't click or look at anything.")
+TYPE_NUDGE = ("You haven't typed anything: the text has to go {where}, not be said to me. Call type_text now with "
+              "text=<what I asked for> and no 'into'. Reply with ONLY the tool call.")
+
+
+def typing_request(text: str) -> str:
+    """'' (not typing), 'focused' (type where the cursor is), 'app' (open an app, then type there),
+    'field' (type into a box the user named: type_text into=…)."""
+    t = text.split("\n")[0]
+    if DISCORD_RE.search(t) or not TYPE_VERB_RE.search(t):
+        return ""
+    if not (TYPE_STRONG_RE.search(t) or TYPE_WHERE_RE.search(t)):
+        return ""  # "napisz mi wiersz": just answer
+    if TYPE_OPEN_RE.search(t):
+        return "app"
+    if TYPE_FIELD_RE.search(t) and not TYPE_FOCUSED_RE.search(t):
+        return "field"
+    return "focused"
 
 
 def request_parts(text: str) -> int:
@@ -1058,6 +1098,8 @@ class Agent:
             self.voice_chat = False  # _voice_input sets it back for spoken turns
             self.hub.emit("user_text", text=text)
         self._turn_auto = auto
+        if auto and self.phrase("pl", "en") == "pl":  # its own comments come from long English prompts
+            text += "\nTwój komentarz powiedz po polsku (PASS zostaje PASS)."
         self.turn = asyncio.create_task(self._run_turn(text, image, auto))
         if not auto:  # (its own comments: the ears stay on while it looks and thinks, so you can cut in)
             self.on_turn(True)  # the ears stop listening until this request is completely done
@@ -1169,7 +1211,19 @@ class Agent:
             wants_control = (CONTROL_INTENT.search(asked) and not TIMER_RE.search(asked)
                              and not DISCORD_RE.search(asked)  # (send_discord does it all, no screenshot needed)
                              and (self.cfg.get("control") or {}).get("enabled", True))
-            if not image and wants_control and eyes.can_see()[0]:
+            self._typing = typing_request(asked) if (self.cfg.get("control") or {}).get("enabled", True) else ""
+            if self._typing == "focused":
+                # the cursor is already in the box: no screenshot (it only tempts it to click around)
+                user_text += ("\n(Type it where my cursor is: ONE call type_text with text=<the finished text, written "
+                              "by you, in my language> and NO 'into'. Don't click, don't look at the screen, and don't "
+                              "say the text out loud: it goes into the box.)")
+                log.info("(typing request: type where the cursor is)")
+            elif self._typing == "app":
+                user_text += ("\n(First open the app with open_app, then type with type_text text=<the finished text, "
+                              "written by you, in my language> and NO 'into' (the app will be focused, and Notepad "
+                              "gets a new empty file). Don't click anything and don't say the text out loud.)")
+                log.info("(typing request: open the app, then type)")
+            if not image and wants_control and self._typing not in ("focused", "app") and eyes.can_see()[0]:
                 # "naciśnij X" / "kliknij": look first (the window with a grid), then click what's really there
                 self.hub.emit("state", state="thinking")
                 image = await asyncio.to_thread(eyes.capture_for_control, tools.ctx.extra.get("char_pos"))
@@ -1234,8 +1288,11 @@ class Agent:
         acted = False  # did a click/key/type happen since the last screenshot it asked for?
         from .tools import control as _control
         _control.reset()  # the user used the mouse since the last request: that's not "taking over"
-        self._control_turn = bool(not auto and CONTROL_INTENT.search(asked) and not TIMER_RE.search(asked)
-                                  and not DISCORD_RE.search(asked))
+        if auto:
+            self._typing = ""
+        self._typed = self._opened = False
+        self._control_turn = bool(not auto and (CONTROL_INTENT.search(asked) or self._typing)
+                                  and not TIMER_RE.search(asked) and not DISCORD_RE.search(asked))
         if self._control_turn and (self.cfg.get("control") or {}).get("enabled", True):
             budget = control_steps  # asked to click/type: it's a control task from the start
             _control.begin(self.control_banner())
@@ -1307,6 +1364,19 @@ class Agent:
                         self.history.append(msg)
                         nudge_msgs.append(msg)
                         continue
+                    # asked to TYPE something, but it said it (or stopped after opening the app): type it now
+                    if not auto and self._typing in ("focused", "app") and not self._typed and nudges < 2:
+                        nudges += 1
+                        log.info("(typing request but nothing typed yet: nudging)")
+                        if self._typing == "app" and not self._opened:
+                            msg = {"role": "user", "content": "First open the app with open_app, then type the text "
+                                                              "with type_text (no 'into'). Only the tool call."}
+                        else:
+                            msg = {"role": "user", "content": TYPE_NUDGE.format(where=self._type_where())}
+                        self.history.append(msg)
+                        nudge_msgs.append(msg)
+                        self._mute = False
+                        continue
                     # controlling the PC but only *talked* about clicking: push it to actually do it
                     if budget > 6 and nudges < 2 and not acted and not DONE_RE.search(raw):
                         nudges += 1
@@ -1337,11 +1407,15 @@ class Agent:
                     if (blocked is None and name in CONTROL_TOOLS and not auto
                             and (self.cfg.get("control") or {}).get("enabled", True)):
                         _control.begin(self.control_banner())  # it can click & type now: show it (and Esc)
+                    if (blocked is None and name == "type_text" and not self._typed and not self._opened
+                            and NEW_FILE_RE.search(asked)):
+                        await asyncio.to_thread(_control.new_file_in_notepad, False)  # "stwórz nowy plik i napisz…"
                     result = blocked if blocked is not None else await run_tool(name, args)
                     ran_tool = True
                     if name in CONTROL_TOOLS or (name == "look_at_screen" and str(args.get("grid")).lower() == "true"):
                         budget = max(budget, control_steps)
-                    if name in ACTION_TOOLS and hasattr(self.brain, "max_tokens"):
+                    if (name in ACTION_TOOLS and hasattr(self.brain, "max_tokens")
+                            and not (self._typing in ("focused", "app") and not self._typed)):  # (the text needs room)
                         # after doing something: a short "done" line (enough room for another tool call)
                         self.brain.max_tokens = min(self.brain.max_tokens, 60)
                     if name in CONTROL_TOOLS and name != "wait_and_look":
@@ -1355,25 +1429,43 @@ class Agent:
                         self._saw_screen = True
                         self._screen_task_at = time.monotonic()
                 log.info("  -> %s%s", result[:200].replace("\n", " "), " [+screenshot]" if image else "")
+                type_next = False  # an app was opened to type in: the typing comes next, it isn't done yet
+                if call and name == "type_text" and str(result).startswith("Typed"):
+                    self._typed = True
+                if (call and name == "open_app" and self._typing == "app" and not self._typed
+                        and not FAILED_RE.match(str(result))):
+                    self._opened = type_next = True
+                    notepad = NOTEPAD_RE.search(str(args.get("name", ""))) or NOTEPAD_RE.search(asked)
+                    made = await asyncio.to_thread(_control.new_file_in_notepad, True) if notepad else False
+                    if not notepad:
+                        await asyncio.sleep(1.5)  # (let the app's window come up and take the focus)
+                    result += ("\n(Notepad is open with a NEW empty file, focused." if made else
+                               "\n(The app is open and focused.") + (" Now type the text: type_text text=<the "
+                               "finished text> with NO 'into'. Don't click anything.)")
                 if call and name in ACTION_TOOLS:
                     ok = not FAILED_RE.match(str(result))
                     # task comments off: once a task succeeded, whatever comes next stays unsaid
                     # (it can still call more tools; a failure is still told to the user)
-                    quiet = ok and not task_comments
+                    quiet = ok and not task_comments and not type_next
                     actions_done += ok
                     if ok and name == "open_youtube_channel" and str(result).startswith("playing"):
                         actions_done = parts_asked  # channel + a video from it: both parts in one go
                     if ok and name == "start_timer" and args.get("then"):
                         actions_done = parts_asked  # "…i naciśnij spację" is the timer's action, for LATER
-                    if name not in CONTROL_TOOLS:
+                    if name not in CONTROL_TOOLS and not type_next:
                         if ok and actions_done < parts_asked:  # "włącz kanał X i odpal jakiś film": not finished yet
                             result += (f"\n(Done. But the request has more parts ({asked!r}): do the NEXT part now "
                                        "with the right tool, without talking. If this tool already did all of it, stop.)")
                         else:
                             result += ("\n(Done.)" if quiet else
                                        "\n(Done. Now say at most ONE short sentence, max 8 words, no questions.)")
+                if self.phrase("pl", "en") == "pl":  # results are in English: small models then answer in English
+                    result += "\n(Mów do użytkownika po polsku.)"
                 text = f'<tool_result name="{name}">\n{result}\n</tool_result>'
                 self.history.append({"role": "user", "content": self._content(text, image)})
+                if (self._typed and name == "type_text" and self._typing in ("focused", "app")
+                        and not TYPE_MORE_RE.search(asked)):
+                    break  # typed what was asked: done (no second copy, no clicking around afterwards)
                 if tools.ctx.extra.get("control_stopped"):  # the user grabbed the mouse: hand it back
                     self._mute = False
                     msg = self.phrase("Okej, oddaję ci myszkę.", "Okay, the mouse is all yours.")
@@ -1428,6 +1520,18 @@ class Agent:
             if asyncio.current_task() is self.turn:  # (not when a newer request replaced this one)
                 self.on_turn(False)
 
+    def _type_where(self) -> str:
+        return ("into the app you just opened (it's focused)" if getattr(self, "_typing", "") == "app"
+                else "into the box where the user's cursor already is")
+
+    @staticmethod
+    def _names_field(user_text: str, into: str, typing: str) -> bool:
+        """Did the user name the box the brain wants to click before typing? ('wpisz kot w wyszukiwarkę')"""
+        said = _fold_pl(user_text.split("\n")[0])
+        if typing == "field":
+            return True
+        return any(w[:5] in said for w in re.findall(r"\w{3,}", _fold_pl(into)))
+
     def _guard_call(self, name: str, args: dict, user_text: str) -> tuple[str, dict, str | None]:
         """Fix the small brain's typical slips before they happen. Returns (name, args, result-if-blocked)."""
         if DISCORD_RE.search(user_text.split("\n")[0]) and name in (
@@ -1447,6 +1551,22 @@ class Agent:
             if args.get("channel") and not p.get("to"):
                 args.pop("to", None)  # a channel was named: never ALSO a DM (it invents "to" sometimes)
             return name, args, None
+        typing = getattr(self, "_typing", "")
+        typed = getattr(self, "_typed", False)
+        if name == "type_text" and str(args.get("into") or "").strip():
+            into = str(args["into"])
+            if typing == "app" or (typing == "focused" and not self._names_field(user_text, into, typing)):
+                # it makes up a box ('Notatnik', the window title, 'Wiadomość') and then clicks that text
+                log.info("(dropped the made-up text box %r: typing where the cursor is)", into)
+                args = {k: v for k, v in args.items() if k != "into"}
+        if not typed and name in ("click_on", "click", "move_mouse", "drag", "scroll", "look_at_screen") and (
+                typing == "focused" or (typing == "app" and getattr(self, "_opened", False))):
+            log.info("(blocked %s: this is a typing request)", name)
+            return name, args, TYPE_BLOCKED.format(where=self._type_where())
+        if not typed and typing == "focused" and name in ("open_app", "open_website", "press_keys") and not (
+                name == "press_keys" and NEW_FILE_RE.search(user_text.split("\n")[0])):
+            log.info("(blocked %s: this is a typing request)", name)
+            return name, args, TYPE_BLOCKED.format(where=self._type_where())
         if name in ("click", "drag", "move_mouse") and not getattr(self, "_saw_screen", False):
             # x,y only mean something on a screenshot it has seen in this request; otherwise it's a random click
             log.info("(blocked a blind %s: no screenshot in this request)", name)
