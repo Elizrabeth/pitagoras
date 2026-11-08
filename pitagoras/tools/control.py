@@ -128,6 +128,7 @@ def reset() -> None:
     global _last_pos
     _last_pos = None
     _abort.clear()
+    ctx.extra.pop("type_window", None)
 
 
 def _cursor() -> tuple[int, int]:
@@ -601,6 +602,69 @@ def _class_name(hwnd: int) -> str:
     return buf.value
 
 
+def focus_window(hwnd: int) -> bool:
+    """Bring a window to the front with the keyboard focus. Windows refuses SetForegroundWindow from a process
+    that isn't in front, so: an Alt tap, then attach to the current foreground thread if it still says no."""
+    if not hwnd:
+        return False
+    if user32.IsIconic(hwnd):
+        user32.ShowWindow(hwnd, 9)  # SW_RESTORE
+    for attempt in range(4):
+        if user32.GetForegroundWindow() == hwnd:
+            return True
+        _send(_key(0x12, False), _key(0x12, True))  # Alt tap: unlocks SetForegroundWindow
+        user32.SetForegroundWindow(hwnd)
+        time.sleep(0.15)
+        if user32.GetForegroundWindow() != hwnd and attempt >= 1:
+            fg_thread = user32.GetWindowThreadProcessId(user32.GetForegroundWindow(), None)
+            me = ctypes.windll.kernel32.GetCurrentThreadId()
+            user32.AttachThreadInput(me, fg_thread, True)
+            try:
+                user32.BringWindowToTop(hwnd)
+                user32.SetForegroundWindow(hwnd)
+                user32.SetFocus(hwnd)
+            finally:
+                user32.AttachThreadInput(me, fg_thread, False)
+            time.sleep(0.2)
+    if user32.GetForegroundWindow() != hwnd:  # still no (a shell popup has it): the stronger ways
+        user32.SwitchToThisWindow(hwnd, True)
+        time.sleep(0.3)
+    if user32.GetForegroundWindow() != hwnd:
+        user32.ShowWindow(hwnd, 6)  # SW_MINIMIZE ...
+        time.sleep(0.15)
+        user32.ShowWindow(hwnd, 9)  # ... SW_RESTORE: a restored window comes to the front
+        time.sleep(0.3)
+        user32.SetForegroundWindow(hwnd)
+    return user32.GetForegroundWindow() == hwnd
+
+
+def leave_own_window() -> None:
+    """Never type into Pitagoras' own chat box: if it has the focus (you typed your request there), give the
+    focus back to the window you were using."""
+    from ..eyes import is_ours, user_window
+
+    fg = user32.GetForegroundWindow()
+    if fg and is_ours(fg):
+        target = user_window()
+        log.info("the focus is in Pitagoras' own window: typing into the window below it instead")
+        focus_window(target)
+        time.sleep(0.15)
+
+
+def _empty_untitled(hwnd: int) -> bool:
+    """Is Notepad showing an empty, never-saved tab right now?"""
+    buf = ctypes.create_unicode_buffer(200)
+    user32.GetWindowTextW(hwnd, buf, 200)
+    if not re.match(r"(Untitled|Bez tytułu)\b", buf.value):
+        return False
+    try:
+        u = _uia_conds()["iu"]
+        doc = u.ElementFromHandle(hwnd).FindFirst(4, u.CreatePropertyCondition(30003, 50030))  # Document
+        return doc is not None and not doc.GetCurrentPropertyValue(30045)
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def new_file_in_notepad(wait_open: bool = True) -> bool:
     """Notepad reopens your old tabs, so typing right away would write into one of your files: bring Notepad to the
     front and open a NEW tab (Ctrl+N). wait_open: it was just started, wait for its window; otherwise only when
@@ -619,16 +683,15 @@ def new_file_in_notepad(wait_open: bool = True) -> bool:
         time.sleep(0.2)
     if not hwnd:
         return False
-    if user32.GetForegroundWindow() != hwnd:
-        if user32.IsIconic(hwnd):
-            user32.ShowWindow(hwnd, 9)  # SW_RESTORE
-        _send(_key(0x12, False), _key(0x12, True))  # an Alt tap lets us take the focus
-        user32.SetForegroundWindow(hwnd)
-        time.sleep(0.4)
-    time.sleep(0.6)  # (its tabs are still loading right after it starts)
-    _send(_key(0x11, False), _key(0x4E, False), _key(0x4E, True), _key(0x11, True))  # Ctrl+N
-    time.sleep(0.7)
-    return user32.GetForegroundWindow() == hwnd
+    time.sleep(0.6 if wait_open else 0.1)  # (its tabs are still loading right after it starts)
+    if not focus_window(hwnd):
+        log.warning("couldn't bring Notepad to the front")
+        return False
+    if not _empty_untitled(hwnd):  # (a fresh Notepad may already be on an empty new tab)
+        _send(_key(0x11, False), _key(0x4E, False), _key(0x4E, True), _key(0x11, True))  # Ctrl+N
+        time.sleep(0.7)
+    ctx.extra["type_window"] = hwnd  # type_text makes sure the typing goes here
+    return focus_window(hwnd)
 
 
 def _target_window() -> tuple[int, dict]:
@@ -767,12 +830,22 @@ def type_text(text: str, into: str = "") -> dict | str:
         if not said.startswith("Clicked"):
             return res  # couldn't find the field: tell the model (it can click by x,y instead)
         time.sleep(0.15)
+    else:
+        win = ctx.extra.get("type_window")  # the Notepad it just opened a new file in
+        if win and user32.IsWindow(win) and user32.GetForegroundWindow() != win and not focus_window(win):
+            return "Error: couldn't bring the window to type in to the front, so nothing was typed. Try again."
+        leave_own_window()
+    target = user32.GetForegroundWindow()  # typing stays in this window: if the focus moves, it stops
     text = str(text)
     # visible, human-ish speed for short text; long text goes quicker so it doesn't take ages
     base = 0.045 if len(text) <= 40 else 0.022 if len(text) <= 200 else 0.006
     shown = ""
     for i, ch in enumerate(text):
         _check_user()
+        if user32.GetForegroundWindow() != target:
+            # you clicked another window (or something popped up): never type (or press Enter) there
+            log.info("the window changed while typing: stopped after %d characters", i)
+            raise TookOver
         if ch == "\n":
             _send(_key(0x0D, False), _key(0x0D, True))
         else:
@@ -798,6 +871,10 @@ KEY_NAMES = {"ctrl": "Ctrl", "control": "Ctrl", "alt": "Alt", "shift": "Shift", 
 @_guard
 def press_keys(keys: str, hold: float = 0) -> dict | str:
     hold = max(0.0, min(10.0, _num(hold)))
+    win = ctx.extra.get("type_window")
+    if win and user32.IsWindow(win) and user32.GetForegroundWindow() != win:
+        focus_window(win)
+    leave_own_window()  # (Enter in its own chat box would just send it another message)
     for combo in [c for c in str(keys).split(",") if c.strip()]:
         _check_user()
         names = [k.strip() for k in combo.replace(" + ", "+").split("+") if k.strip()]

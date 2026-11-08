@@ -604,6 +604,8 @@ class Character(QWidget):
             self.place_popups()
         elif t == "control":
             if m.get("on"):
+                if self.chat.isVisible():  # it's about to click & type: its chat box mustn't hold the focus
+                    self.chat.hide()
                 self.ctl.start(m.get("text") or "")
             else:
                 self.ctl.stop()

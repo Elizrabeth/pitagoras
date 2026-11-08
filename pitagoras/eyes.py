@@ -62,8 +62,8 @@ def window_note(limit: int = 60, clicking: bool = True) -> str:
     return note
 
 
-def active_window_rect() -> dict | None:
-    """Screen rectangle of the window you're using (not Pitagoras, not the desktop/taskbar)."""
+def is_ours(hwnd) -> bool:
+    """One of Pitagoras' own windows (character, bubble, chat box, timer panel)?"""
     import ctypes
     from ctypes import wintypes
 
@@ -71,26 +71,45 @@ def active_window_rect() -> dict | None:
 
     from .config import ROOT
 
+    pid = wintypes.DWORD()
+    ctypes.windll.user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+    if pid.value in _our_pids():
+        return True
+    try:
+        p = psutil.Process(pid.value)
+        return (str(p.exe()).lower().startswith(str(ROOT).lower())
+                or any("pitagoras.overlay" in a for a in p.cmdline()))
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def user_window() -> int:
+    """The window you're using: the one in front, or, when that's Pitagoras (you typed into its chat box), the
+    next real window below it."""
+    import ctypes
+
     user32 = ctypes.windll.user32
-    mine = _our_pids()
-
-    def ours(hwnd) -> bool:  # Pitagoras' own windows (character, bubble, chat box, timer panel)
-        pid = wintypes.DWORD()
-        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
-        if pid.value in mine:
-            return True
-        try:
-            p = psutil.Process(pid.value)
-            return (str(p.exe()).lower().startswith(str(ROOT).lower())
-                    or any("pitagoras.overlay" in a for a in p.cmdline()))
-        except Exception:  # noqa: BLE001
-            return False
-
     h = user32.GetForegroundWindow()
-    for _ in range(50):  # skip our own windows: take the next window down
-        if not h or not (ours(h) or not user32.IsWindowVisible(h)):
+    for _ in range(80):  # skip our own windows: take the next window down
+        if not h:
             break
+        if user32.IsWindowVisible(h) and not user32.IsIconic(h) and not is_ours(h):
+            ex = user32.GetWindowLongW(h, -20)  # GWL_EXSTYLE
+            cloaked = ctypes.c_int(0)
+            ctypes.windll.dwmapi.DwmGetWindowAttribute(h, 14, ctypes.byref(cloaked), 4)  # DWMWA_CLOAKED
+            if not (ex & 0x80) and not cloaked.value:  # not a tool window, not hidden by the shell
+                break
         h = user32.GetWindow(h, 2)  # GW_HWNDNEXT
+    return h or 0
+
+
+def active_window_rect() -> dict | None:
+    """Screen rectangle of the window you're using (not Pitagoras, not the desktop/taskbar)."""
+    import ctypes
+    from ctypes import wintypes
+
+    user32 = ctypes.windll.user32
+    h = user_window()
     if not h:
         return None
     buf = ctypes.create_unicode_buffer(256)
