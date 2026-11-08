@@ -1,7 +1,10 @@
-# Builds dist\Pitagoras-Setup-<version>.exe:  .\installer\build.ps1 -Version 1.0.0
-#   -Personality personality.txt   bundle that personality as the default (the file is named ...-personal.exe,
-#                                  and publish.ps1 never uploads it)
-param([string]$Version = "1.0.0", [string]$Publisher = "", [string]$RepoUrl = "", [string]$Personality = "")
+# Builds dist\Pitagoras-Setup-<version>.exe:  .\installer\build.ps1 -Version 1.2.0
+#   -Personal                      also bundle YOUR current personality.txt (a snapshot is copied to
+#                                  installer\personal\, never committed). The file is named ...-personal.exe,
+#                                  and publish.ps1 never uploads it.
+#   -Personality other.txt         the same, with another file
+param([string]$Version = "1.0.0", [string]$Publisher = "", [string]$RepoUrl = "", [string]$Personality = "",
+      [switch]$Personal)
 $ErrorActionPreference = "Stop"
 $root = Split-Path $PSScriptRoot -Parent
 
@@ -14,11 +17,16 @@ if (-not $iscc) { throw "Inno Setup 6 isn't installed (winget install JRSoftware
 $defs = @("/DAppVersion=$Version")
 if ($Publisher) { $defs += "/DPublisher=$Publisher" }
 if ($RepoUrl) { $defs += "/DRepoUrl=$RepoUrl" }
+if ($Personal -and -not $Personality) { $Personality = "$root\personality.txt" }
 $suffix = ""
 if ($Personality) {
-    $p = (Resolve-Path $Personality).Path
+    $src = (Resolve-Path $Personality).Path
+    $snap = "$PSScriptRoot\personal\personality.txt"
+    New-Item -ItemType Directory -Force (Split-Path $snap) | Out-Null
+    Copy-Item $src $snap -Force
+    Write-Host "bundling the personality from $src"
     $suffix = "-personal"
-    $defs += "/DPersonality=$p", "/DSuffix=$suffix"
+    $defs += "/DPersonality=$snap", "/DSuffix=$suffix"
 }
 & $iscc /Q @defs "$PSScriptRoot\Pitagoras.iss"
 if ($LASTEXITCODE -ne 0) { throw "installer build failed" }

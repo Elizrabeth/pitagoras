@@ -44,8 +44,9 @@ voice:
   language: null            # null = auto detect, or "en", "pl", …
   languages: [en, pl]       # when auto detecting: only pick from these (short phrases confuse it)
   hotwords: "Hej Pitagoras, Pitagoras"   # what the live wake check expects (helps it spell the name)
-  # names Whisper should expect in your requests (add your games/apps; helps "odpal steama" etc.)
-  vocab: "Steam, Spotify, Discord, Riot Client, League of Legends, YouTube, Chrome"
+  # words Whisper should expect in your requests (helps "odpal steama", "następną piosenkę"…).
+  # Add your own (games, champions, friends, slang) in my_words.txt: Ears menu > My words…
+  vocab: "Steam, Spotify, Discord, Riot Client, League of Legends, YouTube, Chrome, OLX, Allegro, Vinted, piosenkę, playlistę, timer, kanał, odpal, włącz, kliknij, naciśnij, zobacz, zerknij, poleć, flash, trackuj"
   silence_ms: 1200          # pause length that ends your sentence (lower = faster replies, but may cut you off)
                             # (after "hej pitagoras" alone it waits up to 2.5 s; once the request is there, 0.9 s)
   min_level: 0.012          # mic sensitivity floor (raise if it triggers on noise)
@@ -91,10 +92,18 @@ voice:
 control:
   enabled: true
   max_steps: 40             # actions per request (each one takes a screenshot + a model step)
+  cursor_speed: 1.0         # how fast its cursor glides to things (2 = twice as fast, 0.5 = slower)
+  # Press Esc while it's in control (the banner at the top of the screen) to stop it.
+
+# Discord: "napisz na discordzie na serwerze X na kanale Y: będę za 10 minut" (needs the Discord app)
+discord:
+  signature: "- Pitagoras AI"   # added after every message; "" = no signature
+  # Its cursor color: right-click Pitagoras > Settings > Colors > Cursor color.
 
 # ── EYES (needs a brain with vision) ─────────────────────────
 eyes:
   mode: ask                 # off | ask (only when you ask) | auto:<minutes> (comments on its own)
+  screen: mouse             # which screen it looks at: mouse (where your cursor is) | character | 1, 2, … (always that one)
 
 # ── FLOATING CHARACTER ───────────────────────────────────────
 overlay:

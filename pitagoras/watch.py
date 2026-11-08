@@ -31,9 +31,13 @@ CHATTER = {
 WATCH_PROMPT = (
     "[Watch-along: you are watching this together with the user. They didn't say anything just now.]\n"
     "{context}\n"
-    "React to what's happening like a friend watching with them: ONE short spoken line (a reaction, joke, "
-    "opinion or question). Don't describe the screen literally and don't repeat your earlier comments. "
-    "{chatter} If there's nothing worth saying, reply with exactly: PASS"
+    "First write a private note inside <think></think>: ONE short sentence about what is happening right now, "
+    "concretely (who/what is on screen, the moment or play, the score if you can see it). It is never spoken; "
+    "it's your memory, so you can explain your comment later if the user asks. "
+    "Then react like a friend watching with them: ONE short spoken line (a reaction, joke, opinion or question). "
+    "Don't describe the screen literally and don't repeat your earlier comments. "
+    "{chatter} If there's nothing worth saying, write the note and then exactly: PASS\n"
+    "Example of a note: <think>Red team's striker just missed an open goal from close range, still 1:0.</think>"
 )
 
 

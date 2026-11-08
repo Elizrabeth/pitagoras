@@ -140,6 +140,7 @@ class App:
         self.hub.emit("toast", text=text)
 
     async def settings_payload(self) -> dict:
+        from .eyes import monitors
         from .voice.rvc import list_models
         from .voice.tts import EDGE_VOICES, KOKORO_VOICES, sapi_voices
 
@@ -191,6 +192,7 @@ class App:
                 "wake_phrase": self.cfg.voice.get("wake_phrase") or "hej pitagoras",
                 "user_name": (self.cfg.get("chat") or {}).get("user_name") or "",
                 "ears_language": self.cfg.voice.get("ears_language", "auto"),
+                "eyes_screen": str((self.cfg.get("eyes") or {}).get("screen", "mouse")),
             },
             "options": {
                 "brains": [{k: e[k] for k in ("id", "label", "group", "vision")} for e in self.catalog],
@@ -200,6 +202,10 @@ class App:
                 "rvc": [{"id": "", "label": "Off (normal voice)"}] + [{"id": n, "label": n} for n in rvc_models],
                 "language": [{"id": i, "label": lbl} for i, lbl in LANGUAGE_OPTS],
                 "ears_language": [{"id": i, "label": lbl} for i, lbl in EARS_LANGUAGE_OPTS],
+                "eyes_screen": [{"id": "mouse", "label": "The one my mouse is on"},
+                                {"id": "character", "label": "The one Pitagoras is on"}]
+                               + [{"id": str(i), "label": f"Screen {i}  ({m['width']}×{m['height']}{', main' if m['primary'] else ''})",
+                                   "group": "Always"} for i, m in enumerate(await asyncio.to_thread(monitors), 1)],
             },
         }
 
@@ -409,7 +415,7 @@ class App:
             return
         simple = {"length": ("chat", "length"), "chatter": ("watch", "chatter"), "memory": ("memory", "enabled"),
                   "pc_control": ("control", "enabled"), "task_comments": ("chat", "task_comments"),
-                  "fact_check": ("chat", "fact_check")}
+                  "fact_check": ("chat", "fact_check"), "eyes_screen": ("eyes", "screen")}
         if key in simple:
             save_setting(*simple[key], bool(value) if key in ("memory", "pc_control", "task_comments", "fact_check") else value)
             self.reload_cfg()
@@ -513,6 +519,15 @@ class App:
             memory.edit_file(memory.NOTES)
             self.toast("Editing memory notes: one fact per line.")
 
+        async def edit_words(_m):
+            from .voice.stt import WORDS_HELP, words_file
+
+            f = words_file()
+            if not f.exists():
+                f.write_text(WORDS_HELP + "Xayah\nflashnął\n", encoding="utf-8")
+            memory.edit_file(f)
+            self.toast("My words: one per line. The ears pick them up right away.")
+
         async def open_voices(_m):
             from .voice.rvc import VOICES_DIR
 
@@ -529,7 +544,7 @@ class App:
         for name, fn in [("say", say), ("interrupt", interrupt), ("speak", speak), ("get_settings", get_settings),
                          ("set", self.on_set), ("look", look), ("where", where), ("open_brains_folder", open_brains),
                          ("clear_memory", clear), ("edit_personality", edit_personality),
-                         ("reset_personality", reset_personality), ("edit_notes", edit_notes),
+                         ("reset_personality", reset_personality), ("edit_notes", edit_notes), ("edit_words", edit_words),
                          ("open_memory_folder", open_memory), ("open_voices_folder", open_voices), ("quit", quit_)]:
             h.on(name, fn)
 
@@ -577,6 +592,7 @@ class App:
                 self.listener.resume()
 
         self.agent.on_turn = lambda active: ears_pause() if active else ears_resume()
+        self.agent.on_quit = self.stop.set  # "hej pitagoras, wyłącz się"
 
         if self.speaker:
             def on_start():

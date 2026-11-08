@@ -20,6 +20,48 @@ GRID_NOTE = (" This shows the active window ({w}x{h} px). Pink grid lines every 
 LAST = {"left": 0, "top": 0, "scale": 1.0, "w": 0, "h": 0}
 
 
+def _our_pids() -> set[int]:
+    """This process and everything it started (the character runs in a child process; with a venv there is an
+    extra launcher process, so the exe path alone doesn't tell)."""
+    import os
+
+    import psutil
+
+    me = psutil.Process(os.getpid())
+    pids = {me.pid}
+    try:
+        pids |= {c.pid for c in me.children(recursive=True)}
+        parent = me.parent()  # the venv launcher (python.exe in .venv) that started us
+        if parent and "python" in parent.name().lower():
+            pids.add(parent.pid)
+    except Exception:  # noqa: BLE001
+        pass
+    return pids
+
+
+def window_note(limit: int = 60, clicking: bool = True) -> str:
+    """The active window's title and the exact names of what can be clicked in it, for the brain.
+    A 4K window shrunk to 1280 px is too small to read, so without this it guessed (and invented) titles.
+    clicking=False: just to look ("zobacz"), so no click instructions (it clicked things it was only shown)."""
+    try:
+        from .tools.control import clickable_names
+
+        title, names = clickable_names(limit)
+    except Exception:  # noqa: BLE001
+        return ""
+    if not title and not names:
+        return ""
+    note = f' Active window: "{title}".'
+    if names and not clicking:
+        return note + (" What's on it, top to bottom (▶ = videos; just for looking, don't click anything): "
+                       + "; ".join(f'"{n}"' for n in names) + ".")
+    if names:
+        note += (" Things you can click in it, top to bottom. Videos are numbered ▶1, ▶2… (\"drugi film\" = ▶2; "
+                 "other entries are channels/buttons). Use these EXACT names with click_on (the ▶number can be left "
+                 "out); never use a title that isn't in this list: " + "; ".join(f'"{n}"' for n in names) + ".")
+    return note
+
+
 def active_window_rect() -> dict | None:
     """Screen rectangle of the window you're using (not Pitagoras, not the desktop/taskbar)."""
     import ctypes
@@ -30,12 +72,17 @@ def active_window_rect() -> dict | None:
     from .config import ROOT
 
     user32 = ctypes.windll.user32
+    mine = _our_pids()
 
-    def ours(hwnd) -> bool:  # Pitagoras' own windows (character, bubble, chat box)
+    def ours(hwnd) -> bool:  # Pitagoras' own windows (character, bubble, chat box, timer panel)
         pid = wintypes.DWORD()
         user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+        if pid.value in mine:
+            return True
         try:
-            return str(psutil.Process(pid.value).exe()).lower().startswith(str(ROOT).lower())
+            p = psutil.Process(pid.value)
+            return (str(p.exe()).lower().startswith(str(ROOT).lower())
+                    or any("pitagoras.overlay" in a for a in p.cmdline()))
         except Exception:  # noqa: BLE001
             return False
 
@@ -59,13 +106,46 @@ def active_window_rect() -> dict | None:
     return {"left": r.left, "top": r.top, "width": w, "height": ht, "hwnd": h}
 
 
+def monitors() -> list[dict]:
+    """The screens, in Windows' order: left/top/width/height + primary."""
+    import mss
+
+    with mss.mss() as sct:
+        mons = sct.monitors[1:] or sct.monitors
+    return [{**m, "primary": m["left"] == 0 and m["top"] == 0} for m in mons]
+
+
+def cursor_pos() -> tuple[int, int] | None:
+    import ctypes
+    from ctypes import wintypes
+
+    p = wintypes.POINT()
+    return (p.x, p.y) if ctypes.windll.user32.GetCursorPos(ctypes.byref(p)) else None
+
+
+def screen_point(char_pos: tuple[int, int] | None = None) -> tuple[int, int] | None:
+    """A point on the screen the eyes should look at (Eyes > Which screen):
+    'mouse' = where your mouse is (default), 'character' = where Pitagoras is, '2' = always screen 2."""
+    choice = str(((ctx.cfg or {}).get("eyes") or {}).get("screen", "mouse")) if ctx.cfg is not None else "mouse"
+    if choice == "character" and char_pos:
+        return char_pos
+    if choice.isdigit():
+        mons = monitors()
+        i = int(choice) - 1
+        if 0 <= i < len(mons):
+            m = mons[i]
+            return m["left"] + m["width"] // 2, m["top"] + m["height"] // 2
+    return cursor_pos() or char_pos
+
+
 def capture(point: tuple[int, int] | None = None, grid: bool = False, region: dict | None = None) -> str:
-    """JPEG of the monitor that contains `point` (the character), as base64.
+    """JPEG of the screen picked in Eyes > Which screen (point = the character's position), as base64.
     region: capture just this screen rectangle instead (e.g. the active window, bigger and sharper).
     grid=True draws a labelled coordinate grid (helps a vision model aim its clicks)."""
     import mss
     from PIL import Image
 
+    point = screen_point(point)
     with mss.mss() as sct:
         mons = sct.monitors[1:] or sct.monitors
         mon = mons[0]
@@ -146,4 +226,4 @@ def look_at_screen(focus: str = "", grid: bool = False) -> dict | str:
     note = "Here is the user's screen right now." + (f" Focus on: {focus}" if focus else "")
     if grid:
         note += GRID_NOTE.format(w=LAST["w"], h=LAST["h"], g=GRID)
-    return {"text": note, "image": img}
+    return {"text": note + window_note(), "image": img}

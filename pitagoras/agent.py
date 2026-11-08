@@ -26,13 +26,18 @@ TOOL_RULES = """
 You can control the computer with tools. To use one, write ONLY this on its own line and then stop:
 <tool>{{"name": "TOOL_NAME", "args": {{...}}}}</tool>
 You will get the result in a <tool_result> message, then continue talking to the user.
-You may say a very short line before a tool call ({ack}). Never invent tool results.
+You may say a very short line before an ACTION tool call ({ack}); never say it before simply answering a
+question. Never invent tool results. If a tool fails, quietly try again or another way; don't tell the user
+about errors, DNS, timeouts or retries unless you finally can't do it.
 Tool calls are silent actions: never mention tool names in what you say.
 Never write emoji or roleplay actions like *dances*: your character shows emotions with the emote tool.
 Tracking cooldowns / timers: when the user says someone used a spell or summoner ("xayah flashneła, trackuj"),
 web_search its cooldown (e.g. "League of Legends Flash summoner spell cooldown seconds"), then start_timer with
 the full cooldown, a label like "Flash Xayah" and a message like "Flash jest gotowy na Xayah!". Reminders
-("za 10 minut") are just start_timer too.
+("za 10 minut") are just start_timer too. Doing something later ("ustaw timer na 10 sekund i naciśnij spację",
+"za minutę kliknij Start") = start_timer with then="naciśnij spację" (the user's own words for the action);
+don't do the action now, it happens by itself when the timer ends. Only set then= when the user asked for
+something to happen WHEN the timer ends; "ustaw timer i otwórz X" means open X now, with a plain timer.
 Controlling the PC (only when the user asks you to click, type or play something): to click anything that has a
 label or text (a button, link, icon name, menu), use click_on with that text: it finds it exactly. To write into
 a text box use type_text with into= the box's name/placeholder (it clicks it first). move_to only moves YOU (the
@@ -49,6 +54,26 @@ For actions (play music, open apps, click, play a game) keep it snappy: at most 
 see or what you're about to do, and don't check twice: just do it.
 You may use emote once in a while to show a feeling (and to dance to music), but never as your only output:
 always also answer or do what was asked.
+Don't greet the user or say their name at the start of replies (no "Cześć!", "Hej Kuba!"): they called you by
+name, that's not a greeting. Just answer.
+When the user leaves the choice to you ("puść jakiś film", "wybierz coś", "any video", "whatever you want"),
+pick one yourself right away and do it. Never ask which one, never list options back.
+YouTube: "włącz/odpal kanał X" = open_youtube_channel (the channel page, not a search). "włącz kanał X i odpal
+jakiś film" = ONE call: open_youtube_channel name=X play=random ("najnowszy" -> play=latest, "najpopularniejszy" ->
+play=popular). A video BY a named YouTuber ("włącz film z gry fnaf od Elevena", "puść odcinek Blowka o
+minecrafcie") = ONE call: open_youtube_channel name=Eleven about=fnaf play=random (name in its basic form).
+Streamers on Twitch / Kick: open_stream_channel. When a request has several parts ("otwórz X i
+zrób Y"), do every part, one tool after another, before you stop. "puść/odpal film(ik)
+o X", "jakiś filmik" = open_youtube (it starts the top video; choose the topic yourself if none is given).
+When they mean something already on the screen ("puść coś stąd", "z głównej", "kliknij jakiś film"):
+look_at_screen, choose one yourself, click_on its exact title. Done in 2 steps, no questions.
+Only use play_on_spotify for music the user asked for; never together with YouTube or a video.
+Shopping / classifieds ("znajdź najtańsze ogłoszenie X na OLX", "szukaj butów na allegro"): open_shop_search
+(cheapest=true when they want the cheapest). To open a page you found with web_search, call open_website with
+the result's number or URL.
+Discord ("napisz na discordzie na serwerze X na kanale Y: będę za 10 minut", "wyślij do Adama na discordzie że…")
+= ONE call: send_discord server=X channel=Y message="będę za 10 minut" (or to=Adam). The message word for word
+as the user said it (same language, no changes; the signature is added by itself). Never type_text for Discord.
 
 Tools:
 {tools}
@@ -83,7 +108,7 @@ JUNK = ["(interrupted)", "[interrupted]", "[old screenshot removed]", "[screensh
         "[watch-along", "<end_of_turn>", "<start_of_turn>", "<eos>", "<bos>", "<|end|>", "<|im_end|>",
         "<|im_start|>", "<|eot_id|>", "<|endoftext|>", "<turn|>", "<|turn>", "</s>", "<channel|>", "<|channel>"]
 JUNK_RE = re.compile("|".join(re.escape(j) for j in JUNK) + r"|\[(?:automatic glance|watch-along)[^\]]*\]"
-                     r"|<tool_result[^>]*>.*?</tool_result>", re.I | re.S)  # (real <tool> calls are kept)
+                     r"|<tool_result[^>]*>.*?</tool_result>|<think>.*?</think>", re.I | re.S)  # (real <tool> calls are kept)
 
 
 PASS_RE = re.compile(r"\bPASS\b[.!]?|\bPAS$")  # the 'stay quiet' word from auto turns (case-sensitive)
@@ -104,18 +129,57 @@ EMOTE_WORDS = {"giggles", "giggle", "laughs", "laugh", "smiles", "smile", "grins
 def no_emotes(text: str) -> str:
     def emote(m: re.Match) -> str:
         inner = m.group(0).strip("*").strip()
+        if inner[:1].isupper() or re.search(r"\d", inner):
+            return inner  # *Battlefield 6*, *The Last of Us*: a title in italics, not an action
         if " " in inner or inner.lower().strip(".!") in EMOTE_WORDS:
             return ""  # *dances around* / *giggles*: an action, not words to say
         return inner  # *perfect*: just emphasis, keep the word
     return EMOTE_RE.sub(emote, EMOJI_RE.sub("", text)).replace("*", "")
 
 
-def auto_summary(prompt: str) -> str:
+async def _timed(fn, *args, timeout: float = 8, default=None):
+    """Run a blocking helper in a thread, but give up after `timeout` s (UI Automation can hang on a frozen
+    window, e.g. a game; that must never freeze the whole request)."""
+    try:
+        return await asyncio.wait_for(asyncio.to_thread(fn, *args), timeout)
+    except asyncio.TimeoutError:
+        log.warning("%s took over %ss: skipped", getattr(fn, "__name__", fn), timeout)
+        return default
+
+
+def auto_context(prompt: str) -> dict:
+    """The facts of a glance/watch prompt: window, what's playing, what was said in the video."""
+    out = {}
+    for ln in prompt.splitlines():
+        ln = ln.strip()
+        if ln.startswith("Active window:"):
+            out["window"] = ln.split(":", 1)[1].strip().strip('"')
+        elif ln.startswith("Playing:"):
+            out["playing"] = ln.split(":", 1)[1].strip()
+        elif ln.startswith("What was said"):
+            out["heard"] = ln.split(":", 1)[1].strip().strip('"')
+    return out
+
+
+def auto_summary(prompt: str, saw: str = "") -> str:
     """What to keep in the history for a glance/watch turn: the context, not the instructions
     (instructions like 'reply PASS' in old messages get copied into normal replies)."""
-    keep = [ln.strip() for ln in prompt.splitlines()
-            if ln.startswith(("Active window:", "Playing:", "What was said"))]
-    return "(You looked at the user's screen by yourself" + (": " + " ".join(keep) if keep else "") + ")"
+    if prompt.startswith("(You looked") or prompt.startswith("(Watching"):
+        return prompt  # already a summary
+    c = auto_context(prompt)
+    watch = prompt.startswith("[Watch-along")
+    bits = []
+    if c.get("window"):
+        bits.append(f'window "{c["window"][:80]}"')
+    if c.get("playing"):
+        bits.append(f"playing {c['playing'][:80]}")
+    if c.get("heard"):
+        bits.append(f'heard in it: "{c["heard"][-300:]}"')
+    if saw:
+        bits.append(f"you noticed: {saw[:300]}")
+    head = (f"(Watching together with the user, {dt.datetime.now():%H:%M}; you commented by yourself"
+            if watch else "(You looked at the user's screen by yourself")
+    return head + (": " + "; ".join(bits) if bits else "") + ")"
 
 
 def scrub(text: str) -> str:
@@ -147,6 +211,7 @@ class StreamParser:
         self.end = ""
         self.inner = ""
         self.tool_calls: list[str] = []
+        self.thoughts: list[str] = []  # <think> notes (never spoken; watch-along keeps them as memory)
         self._eat_gt = False
         names = sorted(tool_names or [], key=len, reverse=True)
         self.inline = re.compile(r"`?\b(" + "|".join(map(re.escape, names)) + r")\(") if names else None
@@ -271,6 +336,22 @@ class StreamParser:
                     continue
                 tag = next((t for t in self.TAGS if self.buf.startswith(t)), None)
                 junk = self.junk_tag.match(self.buf)
+                tagcall = re.match(r"<(\w+)\s*(?=\{)", self.buf)
+                if tagcall and tagcall.group(1) in self.names:  # <emote {"emotion": "happy"}>: a call, not text
+                    close = _close_paren(self.buf, tagcall.end(), "{", "}")
+                    if close == -1:
+                        if len(self.buf) > 800:
+                            self.buf = self.buf[1:]
+                            continue
+                        break
+                    try:
+                        args = json.loads(self.buf[tagcall.end(): close + 1])
+                    except ValueError:
+                        args = {}
+                    self.tool_calls.append(json.dumps({"name": tagcall.group(1), "args": args if isinstance(args, dict) else {}}))
+                    self.buf = re.sub(r"^\s*/?>", "", self.buf[close + 1:])
+                    self._eat_gt = True  # (the '>' may still be on its way in the next chunk)
+                    continue
                 if self.buf.startswith("<tool_result "):  # a made-up result with attributes: hide it
                     gt = self.buf.find(">")
                     if gt == -1:
@@ -285,6 +366,7 @@ class StreamParser:
                 elif self.inline and self.inline.match(self.buf, 1):  # <name(...)>
                     self.buf = self.buf[1:]
                 elif any(t.startswith(self.buf) for t in self.TAGS) or self._junk_start() or (
+                        re.fullmatch(r"<(\w+)\s*", self.buf) and self.buf[1:].strip() in self.names) or (
                         len(self.buf) > 1 and any(p.startswith(self.buf[1:]) for p in self.prefixes)):
                     break  # might be the start of a tag or call; wait for more
                 else:
@@ -302,6 +384,8 @@ class StreamParser:
                 self.inner += self.buf[:i]
                 if self.mode == "tool":
                     self.tool_calls.append(self.inner)
+                elif self.mode == "think" and self.inner.strip():
+                    self.thoughts.append(self.inner.strip())
                 self.inner = ""
                 self.buf = self.buf[i + len(end):]
                 self.mode = "text"
@@ -317,6 +401,8 @@ class StreamParser:
             rest = rest.split("{")[0]  # unclosed JSON at the very end
         elif self.mode == "tool":
             self.tool_calls.append(self.inner + self.buf)  # unterminated call
+        elif self.mode == "think" and (self.inner + self.buf).strip():
+            self.thoughts.append((self.inner + self.buf).strip())
         self.buf = self.inner = ""
         return no_emotes(PASS_RE.sub("", rest))
 
@@ -382,19 +468,94 @@ QUICK_TOOLS = {"get_time", "what_is_playing", "remember", "list_installed", "emo
                "media_control", "start_timer", "cancel_timer", "list_timers"}  # fast: no "on it" needed
 CONTROL_TOOLS = {"click", "click_on", "move_mouse", "drag", "scroll", "type_text", "press_keys", "wait_and_look"}
 ACTION_TOOLS = CONTROL_TOOLS | {"play_on_spotify", "open_app", "open_website", "open_youtube", "media_control",
-                                "volume", "watch_along", "start_timer", "cancel_timer"}
+                                "volume", "watch_along", "start_timer", "cancel_timer", "open_youtube_channel",
+                                "open_shop_search", "open_stream_channel", "send_discord"}
+# "co myślisz o tym?" with nothing else: "this" is whatever is on the screen
+# the grid instructions + window title + clickable names that come with a screenshot
+SCREEN_NOTE_RE = re.compile(r" This shows the active window.*?(?=\)\s*$|$)| Active window: \".*?(?=\)\s*$|$)", re.S)
+def _fold_pl(s: str) -> str:
+    """Lowercase without Polish accents ('naciśnij spację' -> 'nacisnij spacje') for loose word matching."""
+    import unicodedata
+
+    s = unicodedata.normalize("NFKD", s.lower().replace("ł", "l"))
+    return "".join(c for c in s if not unicodedata.combining(c))
+
+
+# the request asks for a video, not just a channel page
+WANTS_VIDEO_RE = re.compile(r"\b(film\w*|filmik\w*|video|wideo|odcin\w*|coś|cos|jakiś|jakis|losow\w*|random|najnow\w*|"
+                            r"ostatni\w*|nowy|nowego|newest|latest|popularn\w*|najlepsz\w*|top|any|something)\b", re.I)
+# verbs that each ask for one action ("włącz kanał X i odpal jakiś film" has two)
+ACTION_VERB_RE = re.compile(
+    r"\b(włącz\w*|odpal\w*|puść\w*|pusc\w*|otwórz\w*|otworz\w*|uruchom\w*|zagraj\w*|wyszukaj\w*|poszukaj\w*|znajdź\w*|"
+    r"pokaż\w*|ustaw\w*|nastaw\w*|zatrzymaj\w*|wyłącz\w*|zamknij\w*|kliknij\w*|naciśnij\w*|wpisz\w*|przewiń\w*|"
+    r"napisz\w*|zapisz\w*|wyślij\w*|skopiuj\w*|wklej\w*|pobierz\w*|zrób\w*|write|save|send|copy|paste|"
+    r"open|play|launch|start|search|find|show|set|stop|close|click|press|type)\b", re.I)
+
+
+def request_parts(text: str) -> int:
+    """How many separate things a request asks for: 'włącz kanał X i odpal film' -> 2. A verb that only
+    repeats the first one's object doesn't count ("otwórz steama i odpal deadlocka" opens both in one go anyway)."""
+    verbs = ACTION_VERB_RE.findall(text)
+    if len(verbs) < 2 or not re.search(r"\b(i|oraz|a potem|potem|następnie|and|then)\b|,", text, re.I):
+        return 1
+    return min(len(verbs), 3)
+
+
+# a follow-up to something just done on the screen ("ale włącz go", "ten drugi", "nie włączyłeś", "jeszcze raz")
+SCREEN_FOLLOW_RE = re.compile(
+    r"\b(go|ją|je|ten|tą|tę|tamt\w*|ostatni\w*|pierwsz\w*|drug\w*|trzeci\w*|następn\w*|poprzedni\w*|inn\w*|"
+    r"jeszcze raz|ponownie|nie (?:włączył\w*|kliknął\w*|działa|zadziałał\w*|odpalił\w*)|włącz|odpal|puść|wybierz|"
+    r"otwórz|zamknij|wróć|cofnij|przewiń|zatrzymaj|again|that one|this one|the other|another)\b", re.I)
+# keyboard keys the model sometimes tries to *click* ("click_on Spacja"): press them instead
+KEY_NAMES = {k: v for v, names in {
+    "space": ["spacja", "spację", "spacje", "spacji", "space", "spacebar", "klawisz spacja", "spacja key"],
+    "enter": ["enter", "entera", "enterem", "return", "klawisz enter"],
+    "esc": ["esc", "escape", "escapea", "eskejp"],
+    "tab": ["tab", "taba", "tabulator"],
+    "backspace": ["backspace", "backspacea"],
+    "delete": ["delete", "del", "usuń klawisz"],
+    "left": ["strzałka w lewo", "strzałkę w lewo", "left arrow", "lewa strzałka"],
+    "right": ["strzałka w prawo", "strzałkę w prawo", "right arrow", "prawa strzałka"],
+    "up": ["strzałka w górę", "strzałkę w górę", "up arrow"],
+    "down": ["strzałka w dół", "strzałkę w dół", "down arrow"],
+}.items() for k in names}
+# "ustaw timer na 10 sekund i naciśnij spację": the clicking happens later, so it's not a click request now
+TIMER_RE = re.compile(r"\b(timer\w*|minutnik\w*|stoper\w*|za \d+|za (?:minutę|sekundę|godzinę|chwilę|moment)|"
+                      r"za (?:pół|kilka|parę|jedn\w*|dwie|dwa|trzy|pięć|"
+                      r"dziesięć|piętnaście|dwadzieścia|trzydzieści)\w* (?:sekund|minut|godzin)\w*|"
+                      r"after \d+|in \d+ (?:seconds?|minutes?)|odlicz\w*)", re.I)
+DEICTIC_RE = re.compile(
+    # just "zobacz" / "spójrz na to" / "zerknij tu": look at the screen
+    r"\b((?:zobacz|spójrz|spojrz|popatrz|patrz|zerknij|obczaj|oglądnij|obejrzyj|rzuć okiem|sprawdź|look|"
+    r"take a look|check(?: it| this)? out|watch)(?: się)?(?: na)?(?: to| tu| tutaj| ten ekran| ekran| tego| tę| this| here)?|"
+    r"co widzisz|co jest na ekranie|co mam na ekranie|what do you see|what's on (?:my|the) screen|"
+    r"co (?:myślisz|sądzisz|powiesz) o (?:tym|tej|tego|tych)|co o (?:tym|tej|tych) (?:myślisz|sądzisz)|"
+    r"co to (?:jest|za)|co to\b|co tu (?:jest|widać|się dzieje)|jak ci się (?:to )?podoba|(?:zobacz|spójrz|patrz)(?: na)? to|"
+    r"oceń (?:to|tego|tę)|ładne to|dobre to|"
+    r"what do you think (?:of|about) (?:this|that|it)|what(?:'s| is) (?:this|that)|look at this|rate this|"
+    r"how does (?:this|it) look|thoughts on this)\b", re.I)
+# the user asked for YouTube / a video site, so Spotify must not start too
+NOT_SPOTIFY_RE = re.compile(r"\b(yt|youtub\w*|kanał\w*|channel|film\w*|video|wideo|netflix\w*|twitch\w*|stream\w*|"
+                            r"serial\w*|odcin\w*)\b", re.I)
+SPOTIFY_RE = re.compile(r"\b(spotif\w*|muzy\w*|piosenk\w*|utw[oó]r\w*|album\w*|playlist\w*|song|music|track)\b", re.I)
 # a tool result that means it did NOT work (then it may say so)
 FAILED_RE = re.compile(r"\s*(error|couldn't|could not|no |not found|stopped|mouse & keyboard control is turned off|"
                        r".*\bis not installed\b|.*didn't start|.*needs a click)", re.I)
-CONTROL_INTENT = re.compile(r"\b(klik\w*|click\w*|wpisz|wpisać|naciśnij|wciśnij|przyciśnij|press|type in|"
-                            r"zaznacz|przewiń|scroll|zamknij okno|graj w|zagraj w|play the game)", re.I)
+DISCORD_RE = re.compile(r"\b(discord\w*|dc)\b", re.I)
+CONTROL_INTENT = re.compile(r"\b(klik\w*|click\w*|wpisz|wpisać|naci[sś]\w*|wci[sś]\w*|przyci[sś]\w*|press|type in|"
+                            r"tapnij|stuknij|puknij|dotknij|najedź|przeciągnij|odznacz|potwierdź|zatwierdź|"
+                            r"tap|hit enter|hit space|"
+                            r"zaznacz|przewiń|scroll|zamknij okno|graj w|zagraj w|play the game|"
+                            # picking something that's already on the screen ("puść coś stąd", "z głównej")
+                            r"stąd|z tej strony|z tych|z głównej|z ekranu|from here|on this page|"
+                            r"on the screen|from the home ?page)", re.I)
 DONE_RE = re.compile(r"\b(gotowe|zrobione|done|finished|skończone)\b", re.I)
 # ── fact check: questions get a web search first, so the answer is checked against the internet ──
 QUESTION_RE = re.compile(
     r"\?\s*$|^(?:what|what's|whats|who|who's|whom|whose|when|where|why|how|which|is|are|was|were|does|do|did|"
     r"can|could|will|would|should|has|have|tell me|explain|czy|co|kto|kogo|komu|kim|kiedy|gdzie|dlaczego|czemu|"
     r"jak|jaki|jaka|jakie|jakiego|jakiej|jakim|ile|ilu|który|która|które|którego|której|skąd|dokąd|po co|"
-    r"powiedz|opowiedz|wytłumacz|wyjaśnij|sprawdź|znajdź|wiesz)\b", re.I)
+    r"powiedz|opowiedz|wytłumacz|wyjaśnij|sprawdź|znajdź|wiesz|znasz|słyszał\w*|have you heard|do you know)\b", re.I)
 SMALLTALK_RE = re.compile(
     r"^(?:how are you|how's it going|hows it going|what's up|whats up|how do you feel|who are you|what are you|"
     r"what can you do|what's your name|what is your name|do you like|are you|can you hear|jak się masz|"
@@ -412,24 +573,152 @@ DO_RE = re.compile(
     r"zatrzyma\w*|pauz\w*|następn\w*|pogłoś\w*|ścisz\w*|klik\w*|click|type|wpisz|wpisać|napisz|napisać|"
     # made up on the spot, nothing to look up
     r"joke|story|poem|sing|song for me|kawał\w*|żart\w*|dowcip\w*|historyjk\w*|bajk\w*|wiersz\w*|zaśpiewaj|"
-    r"wymyśl\w*|rap\w*)\b", re.I)
+    r"wymyśl\w*|rap\w*|"
+    # shops / video sites: that's opening a page, not a question to look up
+    r"olx\w*|allegr\w*|vinted\w*|amazon\w*|ebay\w*|ceneo\w*|otomoto\w*|yt|youtub\w*|kanał\w*|twitch\w*|kick\w*|"
+    r"stream\w*)\b", re.I)
+
+
+POINTER_WORDS = re.compile(
+    r"^(?:to|tym|tego|tej|tu|tutaj|ten|ta|te|teraz|jest|się|mi|no|a|i|ej|hej|sobie|na|ekran\w*|screen|film\w*|"
+    r"filmik\w*|gr\w*|game|video|wideo|zdjęci\w*|obraz\w*|obrazek|picture|image|stron\w*|page|this|that|it|here|now|"
+    r"one|thing|rzecz\w*|ogóle|w|of|about)$", re.I)
+
+
+def vague_this(text: str) -> bool:
+    """'co myślisz o tym?', 'co to jest?', 'what do you think about this game': 'this' has no subject, so it
+    means what's on the screen. ('co to jest fotosynteza' has one, so it doesn't count.)"""
+    m = DEICTIC_RE.search(text)
+    if not m:
+        return False
+    rest = re.findall(r"[^\W\d_]+", text[: m.start()] + " " + text[m.end():])
+    return all(POINTER_WORDS.match(w) for w in rest)
+
+
+# while watching: "co miałeś na myśli", "o co ci chodziło", "ten gol", "co się stało" -> about the video / its own
+# comments, not something to look up online
+WATCH_REF_RE = re.compile(
+    r"\b(miał[ae]?ś na myśli|chodziło|powiedział[ae]?ś|mówił[ae]?ś|wcześniej|przed chwilą|"
+    r"co się (?:stało|dzieje|wydarzyło)|co on|co ona|co oni|kto (?:to|wygrywa|prowadzi|strzelił)|"
+    r"jaki (?:jest )?wynik|ile jest|dlaczego (?:on|ona|oni|tak)|"
+    r"t(?:a|ę|ej|en|o|ego|ym|ych|amt\w+) (?:akcj\w*|gol\w*|bramk\w*|zagrani\w*|scen\w*|moment\w*|podani\w*|"
+    r"faul\w*|strzał\w*|rzut\w*|kar\w+|sędzi\w*|piłkarz\w*|zawodnik\w*|gracz\w*|postać|postaci\w*|"
+    r"film\w*|odcin\w*|mecz\w*|runda|rund\w*|walk\w*|kill\w*|zagrywk\w*)|"
+    r"what did you mean|you (?:just )?said|what happened|who scored|what(?:'s| is) the score|that (?:play|goal|scene|move))",
+    re.I)
+
+# "hej pitagoras wyłącz się": close the whole app. ("zamknij się" = "shut up": that only stops it talking)
+QUIT_RE = re.compile(
+    r"\b(?:wyłącz|wylacz|wyłączaj|wyłączyć|wylaczyc|zakończ|zakoncz)\s+(?:się|sie|siebie|pitagoras\w*)(?!\w)|"
+    r"\b(?:się|sie)\s+(?:wyłącz|wylacz)\w*|"
+    r"\bzamknij\s+(?:siebie|pitagoras\w*)(?!\w)|"
+    r"\b(?:shut\s*(?:yourself\s+)?down|turn\s+yourself\s+off|(?:quit|exit|close)\s+(?:yourself|pitagoras|the app))\b",
+    re.I)
+
+
+# "film z fnaf od Elevena", "odcinek by MrBeast": a named YouTuber (not "od razu", "od nowa", "od początku")
+BY_YOUTUBER_RE = re.compile(
+    r"\b(?:od|by)\s+(?!(?:razu|nowa|początku|poczatku|teraz|zaraz|dziś|dzis|jutra|wczoraj|rana|kiedy|tego|tej|"
+    r"ciebie|mnie|niego|niej|nich|siebie|the|a|my|me|you)\b)([^\W\d_][\w\-]{2,})", re.I)
+
+
+VIDEO_FILLER = re.compile(
+    r"\b(hej|hey|pitagoras\w*|włącz\w*|wlacz\w*|puść|pusc|puścisz|odpal\w*|pokaż|pokaz|zagraj|znajdź|znajdz|"
+    r"wyszukaj|daj|mi|nam|proszę|prosze|please|play|find|show|me|jaki[śs]|jakąś|jakas|jakie[śs]|losow\w*|"
+    r"film\w*|filmik\w*|odcin\w*|wideo|video|materiał\w*|nagrani\w*|kanał\w*|kanal\w*|channel|"
+    r"na|youtub\w*|yt|z gry|z grze|z|ze|o|about|ten|tę|te|to|ta|tego|i|and|the|a|of|"
+    r"najnowsz\w*|najpopularniejsz\w*|przedostatni\w*|ostatni\w*|newest|latest|popular\w*|most|viewed|recent|"
+    r"pierwsz\w*|drug[iaąe]\w*|trzec\w*|czwart\w*|piąt[yaą]\w*|szóst\w*|siódm\w*|ósm\w*|dziewiąt\w*|"
+    r"dziesiąt\w*|first|second|third|fourth|fifth|\d{1,2}(?:st|nd|rd|th)|wrzucon\w*|wrzucił\w*|"
+    r"(?:od|by)\s+\S+)\b", re.I)
+
+
+def video_topic(text: str, name: str) -> str:
+    """What the user said about the video itself: 'włącz teorię FNAF 3 od Elevena na YouTubie' -> 'teorię FNAF 3'."""
+    t = re.sub(r"(?i)\b\d{1,2}\s*\.?\s*(?=naj|most|new|last|ostat|popul)", " ", text)  # "2. najnowszy"
+    t = re.sub(r"(?i)\b(from|channel of|z kanału)\b", " ", t)
+    t = VIDEO_FILLER.sub(" ", t)
+    n = name.strip().lower()
+    stem = n[:max(3, len(n) - 2)]  # Blowek -> "blow" (also catches Blowka, Blowkiem); Eleven -> "elev"
+    if len(stem) >= 3:
+        t = re.sub(rf"(?i)\b{re.escape(stem)}\w*", " ", t)
+    return re.sub(r"\s+", " ", re.sub(r"[^\w\s'\-]", " ", t)).strip()
+
+
+def wants_quit(text: str) -> bool:
+    """Only a short, direct 'turn yourself off' (not 'wyłącz się z tej gry i zagraj w...')."""
+    words = re.findall(r"[^\W\d_]+", text)
+    return bool(QUIT_RE.search(text)) and len(words) <= 6
+
+
+# "poleć mi serial", "w co zagrać?", "co warto obejrzeć", "recommend me a game"
+REC_RE = re.compile(
+    r"\b(pole[ćc]\w*|rekomend\w*|recommend\w*|suggest\w*|zaproponuj\w*|doradź\w*|"
+    r"co (?:warto|mam|byś|by|możesz) (?:\w+ )?(?:obejrzeć|zagrać|pograć|posłuchać|przeczytać|zjeść|ugotować|kupić|"
+    r"zobaczyć|robić)|w co (?:zagrać|pograć|mam zagrać)|co (?:obejrzeć|posłuchać|przeczytać|zjeść|kupić)|"
+    r"jak\w* (?:dobr\w* )?(?:film|serial|gr[aęy]|anime|książk|album|muzyk|słuchawk|laptop|telefon|myszk|klawiatur)\w*"
+    r" (?:warto|polecasz|wybrać|kupić|obejrzeć)|what should i (?:watch|play|read|listen to|buy|eat)|"
+    r"any (?:good )?(?:movies?|shows?|games?|books?|anime) (?:to|you))", re.I)
+
+
+def wants_recommendation(text: str) -> bool:
+    return bool(REC_RE.search(text)) and not vague_this(text)
+
+
+REC_FILLER = re.compile(
+    r"\b(pole[ćc]\w*|rekomend\w*|zaproponuj\w*|doradź\w*|mi|nam|jakiś|jakąś|jakieś|jakiegoś|jakichś|dobr\w*|fajn\w*|"
+    r"coś|cos|proszę|możesz|może|warto|jaki\w*|jaką|jakie|co|w|mam|byś|by|czy|ty|ci|teraz|dzisiaj|"
+    r"recommend\w*|suggest\w*|me|some|good|please|can|could|you|what|should|i|any|a)\b", re.I)
+REC_VERBS = {"zagrać": "gry", "pograć": "gry", "obejrzeć": "filmy i seriale", "zobaczyć": "filmy i seriale",
+             "posłuchać": "muzyka", "przeczytać": "książki", "zjeść": "przepisy na obiad", "ugotować": "przepisy",
+             "kupić": "", "play": "games", "watch": "movies and shows", "read": "books", "listen": "music"}
+
+
+def rec_query(text: str, polish: bool) -> str:
+    """'poleć mi jakiś dobry serial kryminalny' -> 'serial kryminalny najlepsze 2026'
+    ('w co zagrać na weekend' -> 'gry na weekend najlepsze 2026'): search engines want the topic, not the ask."""
+    t = text.lower().rstrip("?!. ")
+    for verb, noun in REC_VERBS.items():
+        t = re.sub(rf"\b{verb}\b", noun, t)
+    words = [w for w in REC_FILLER.sub(" ", t).split() if w]
+    year = dt.date.today().year
+    return f"{' '.join(words)} {'najlepsze' if polish else 'best'} {year}".strip()
 
 
 def wants_fact_check(text: str) -> bool:
     """A question the internet could answer (not small talk, a request to do something, or about this PC)."""
     t = text.strip()
-    if len(re.findall(r"[^\W\d_]+", t)) < 3:
+    if len(re.findall(r"[^\W\d_]+", t)) < 3 or vague_this(t):
         return False
+    if wants_recommendation(t):
+        return True
     if not QUESTION_RE.search(t) or SMALLTALK_RE.search(t) or LOCAL_RE.search(t) or DO_RE.search(t):
         return False
     return not CONTROL_INTENT.search(t)
 
 
+REC_NOTE = ("(What people recommend online right now, found just now:\n{results}\n"
+            "Recommend 2-4 concrete things: real titles/names taken from these results (not just your own "
+            "favourites from your personality), each with a few words on why, matched to what the user asked. "
+            "Short and natural, no "
+            "lists or numbering, don't read out links or sources, and you don't need web_search for this again.)")
 FACT_NOTE = ("(Internet results for this question, found just now:\n{results}\n"
              "Before answering, compare them with what you know. If they agree, just answer. If they disagree with "
              "you or are newer, trust these results and say what they say. If they have nothing to do with the "
              "question, ignore them and answer normally. Don't read out links, sources or numbers in brackets, "
              "and you don't need web_search for this again.)")
+# it said it would do something ("odpalę ci to", "już otwieram") but called no tool: nothing happened
+PROMISE_RE = re.compile(r"\b(odpal(?:ę|am)|otw(?:orzę|ieram)|włącz(?:ę|am)|pusz(?:czę|czam)|uruchom(?:ię|iam)|"
+                        r"ustaw(?:iam|ię)|nastaw(?:iam|ię)|nacis(?:nę|kam)|klikn(?:ę)|klikam|wcis(?:nę|kam)|"
+                        r"wyszuk(?:am|uję)|znajd(?:ę|uję)|sprawdz(?:ę|am)|zaraz (?:to )?(?:zrobię|ogarnę)|"
+                        r"wysy[łl]am|wyślę|napiszę|piszę|lecę|ogarniam|"
+                        r"i'll (?:open|play|start|search|find|launch|check|send|write)|opening|launching|playing it|"
+                        r"sending)\b", re.I)
+# a reply that is only "Robi się!" / "Moment!" means it meant to do something (and didn't)
+ACK_ONLY_RE = re.compile(r"^\W*(?:(?:no |dobra,? |okej,? |ok,? )?(?:już )?(?:się )?robi(?: się)?|się robi|już się robi|"
+                         r"moment|chwila|jasne|już|on it|okay|sure|done)\W*$", re.I)
+PROMISE_NUDGE = ("You said you'd do it, but you called no tool, so nothing happened. Call the right tool now "
+                 "(only the tool call, no words).")
 EMPTY_NUDGE = ("You only made a face and said nothing. Now actually do what I asked (call the right tool), "
                "or answer me in a short sentence.")
 NUDGE = ("You only described the action, nothing was clicked or typed. Do it now: reply with ONLY the tool call, "
@@ -467,6 +756,49 @@ class Agent:
         self.follow_ups = bool(v.get("follow_ups", False))
         self.armed_until = 0.0
         self._control_turn = False
+        self._turn_auto = False  # the running turn is Pitagoras's own (a watch-along comment / glance)
+        self.watch_log: list[dict] = []  # watch-along: what it saw, heard and said (so you can ask about it)
+        self.on_quit: Callable[[], None] | None = None  # set by the app ("wyłącz się")
+
+    # ── watch-along memory ───────────────────────────────────
+    def watching(self) -> bool:
+        """Watching along now, or did a few minutes ago (questions about the video still make sense)."""
+        app = tools.ctx.extra.get("app")
+        if app is not None and getattr(getattr(app, "watcher", None), "active", False):
+            return True
+        return bool(self.watch_log) and time.time() - self.watch_log[-1]["t"] < 600
+
+    def remember_watch(self, prompt: str, saw: str, said: str) -> None:
+        c = auto_context(prompt)
+        if not (saw or said or c.get("heard")):
+            return
+        self.watch_log.append({"t": time.time(), "saw": saw[:300], "said": said[:300],
+                               "heard": c.get("heard", "")[-300:], "window": c.get("window", "")[:80]})
+        del self.watch_log[:-12]
+        log.info("watch memory: saw=%r said=%r", saw[:80], said[:80])
+
+    def watch_memory_note(self) -> str:
+        """The recent watch-along moments, for a question asked while watching."""
+        now = time.time()
+        lines = []
+        for e in self.watch_log[-8:]:
+            ago = int(now - e["t"])
+            when = f"{ago}s ago" if ago < 90 else f"{ago // 60} min ago"
+            bits = []
+            if e["window"]:
+                bits.append(f'window "{e["window"]}"')
+            if e["saw"]:
+                bits.append(f"you saw: {e['saw']}")
+            if e["heard"]:
+                bits.append(f'heard: "{e["heard"][-200:]}"')
+            bits.append(f'you said: "{e["said"]}"' if e["said"] else "you stayed quiet")
+            lines.append(f"- {when}: " + "; ".join(bits))
+        if not lines:
+            return ""
+        return ("(Watch-along memory: what you saw, heard and said while watching with me, oldest first:\n"
+                + "\n".join(lines) + "\nIf I ask about the video/game/match or about something you said "
+                "('co miałeś na myśli', 'o co ci chodziło'), answer from this memory and the current screen: "
+                "explain in your own words what you meant and what happened. Never say you don't remember.)")
 
     def set_wake_phrase(self, phrase: str) -> None:
         """e.g. "hej pitagoras" or "hej madzia". Other spellings of the default name are only kept for Pitagoras."""
@@ -585,6 +917,7 @@ class Agent:
         if my_name.lower() not in ("pitagoras", "pythagoras"):
             parts.append(f"Your name is {my_name} (the user calls you with \"{self.wake_phrase}\").")
         user_name = ((self.cfg.get("chat") or {}).get("user_name") or "").strip()
+        user_name = " ".join(w[:1].upper() + w[1:] for w in user_name.split())  # "kuba" -> "Kuba"
         if user_name:
             parts.append(f"The user's name is {user_name}. When you address them, call them {user_name}; "
                          "never make up other names or nicknames for them.")
@@ -622,6 +955,47 @@ class Agent:
             self.history.append({"role": "assistant", "content": text})
             self.save()
 
+    async def _goodbye(self) -> None:
+        """'Wyłącz się': say bye, let it finish speaking, then close the whole app."""
+        log.info("asked to shut down: closing Pitagoras")
+        msg = random.choice(self.phrase(["Pa pa! Wyłączam się.", "Do zobaczenia! Wyłączam się.", "Okej, papa!"],
+                                        ["Bye! Shutting down.", "See you later!", "Okay, bye bye!"]))
+        self.hub.emit("assistant_start")
+        self.hub.emit("emotion", emotion="happy")
+        self._say(msg)
+        self.hub.emit("assistant_end")
+        if self.speaker:
+            self.speaker.flush()
+            await asyncio.sleep(0.3)
+            await asyncio.to_thread(self.speaker.idle.wait, 8)
+        else:
+            await asyncio.sleep(1.5)  # (time to read the bubble)
+        self.busy = False
+        self.on_quit()
+
+    async def _video_speech(self, seconds: int = 40) -> str:
+        """What was said in the video lately (PC sound -> Whisper), for questions while watching."""
+        app = tools.ctx.extra.get("app")
+        if app is None or not ((app.cfg.get("watch") or {}).get("hear_audio", True)):
+            return ""
+        try:
+            from .watch import TAP, transcribe
+
+            audio = TAP.since(time.monotonic() - seconds)
+            return await asyncio.to_thread(transcribe, audio, app.cfg.voice)
+        except Exception as e:  # noqa: BLE001
+            log.warning("could not transcribe the video audio: %s", e)
+            return ""
+
+    async def do_later(self, text: str) -> None:
+        """A timer's 'then' ("naciśnij spację"): run it as a request once nothing else is going on."""
+        for _ in range(120):  # (up to a minute: let a reply that's being spoken finish first)
+            if not self.in_turn():
+                break
+            await asyncio.sleep(0.5)
+        log.info("timer action: %s", text)
+        await self.submit(text)
+
     def wake_status(self, partial: str) -> str | None:
         """For the ears' live check: None = not for me, 'phrase' = just "hej pitagoras" so far,
         'prompt' = "hej pitagoras" + a request."""
@@ -643,8 +1017,12 @@ class Agent:
 
     async def _voice_input(self, text: str, live_wake: str | None = None) -> None:
         if self.in_turn():  # one thing at a time: speech that slipped in while busy is dropped
-            log.info("(busy, ignored what was heard)")
-            return
+            # ...except while it's only making a watch-along comment by itself: you talking wins
+            if not (self._turn_auto and (not self.wake_word or self.wake_heard(text) or live_wake is not None
+                                         or time.monotonic() < self.armed_until)):
+                log.info("(busy, ignored what was heard)")
+                return
+            log.info("(cut into its own comment: answering you instead)")
         if self.wake_word:
             now = time.monotonic()
             addressed = self.wake_heard(text) or live_wake is not None
@@ -658,6 +1036,8 @@ class Agent:
             self.armed_until = 0.0
             if addressed and len(re.findall(r"[^\W\d_]+", text)) <= 3:  # just the phrase: wait for the request
                 self.armed_until = now + 8
+                if self._turn_auto and self.in_turn():
+                    self.interrupt()  # it was commenting by itself: stop and listen
                 log.info("wake phrase heard, listening for the request…")
                 self.wake_feedback()
                 return
@@ -677,14 +1057,38 @@ class Agent:
             tools.ctx.extra["request_started"] = self.last_activity  # timers count from here
             self.voice_chat = False  # _voice_input sets it back for spoken turns
             self.hub.emit("user_text", text=text)
+        self._turn_auto = auto
         self.turn = asyncio.create_task(self._run_turn(text, image, auto))
-        self.on_turn(True)  # the ears stop listening until this request is completely done
+        if not auto:  # (its own comments: the ears stay on while it looks and thinks, so you can cut in)
+            self.on_turn(True)  # the ears stop listening until this request is completely done
 
     def interrupt(self) -> None:
         if self.turn and not self.turn.done():
             self.turn.cancel()
         if self.speaker:
             self.speaker.interrupt()
+
+    def control_banner(self) -> str:
+        return self.phrase("Naciśnij Esc, aby wyjść z trybu kontroli", "Press Esc to leave control mode")
+
+    def stop_control(self) -> None:
+        """The user pressed Esc while it was clicking/typing: stop the whole task right now and say so."""
+        turn = self.turn
+        if not turn or turn.done():
+            return
+        msg = self.phrase("Okej, przerywam. Myszka jest twoja.", "Okay, stopping. The mouse is yours.")
+
+        def told(_t):
+            self.history.append({"role": "assistant", "content": msg})
+            self.hub.emit("assistant_start")
+            self.hub.emit("assistant_text", delta=msg)
+            self.hub.emit("assistant_end")
+            if self.speaker:
+                self.speaker.say(msg)
+            self.save()
+
+        turn.add_done_callback(told)
+        self.interrupt()
 
     @staticmethod
     def _content(text: str, image: str | None):
@@ -700,14 +1104,27 @@ class Agent:
         req = getattr(self, "_turn_request", None)
         if req is not None and not any(m is req for m in hist):
             hist = [req] + hist  # long PC-control sessions: never lose sight of what was asked
-        last_img = max((i for i, m in enumerate(hist) if isinstance(m["content"], list)), default=-1)
+        # only a screenshot from THIS request counts: an older one shows a screen that has changed since
+        # (it used to click things from a stale picture on the next request)
+        req_at = next((i for i, m in enumerate(hist) if m is req), 0)
+        last_img = max((i for i, m in enumerate(hist) if isinstance(m["content"], list) and i >= req_at), default=-1)
         if not self.brain.vision:
             last_img = -1
         out = [{"role": "system", "content": self.system_prompt()}]
+
+        def text_of(m) -> str:
+            c = m["content"]
+            return c if isinstance(c, str) else " ".join(p.get("text", "") for p in c if p.get("type") == "text")
+
+        # the long "what you can click" lists: only the newest one matters (the context is small)
+        last_note = max((i for i, m in enumerate(hist) if SCREEN_NOTE_RE.search(text_of(m))), default=-1)
         for i, m in enumerate(hist):
             if isinstance(m["content"], list) and i != last_img:
-                text = " ".join(p.get("text", "") for p in m["content"] if p.get("type") == "text")
-                m = {"role": m["role"], "content": text}  # old screenshots: words only, no marker to copy
+                m = {"role": m["role"], "content": text_of(m)}  # old screenshots: words only, no marker to copy
+            if i != last_note and SCREEN_NOTE_RE.search(text_of(m)):
+                slim = SCREEN_NOTE_RE.sub(" (screen details from back then left out)", text_of(m))
+                m = {"role": m["role"], "content": slim if isinstance(m["content"], str) else
+                     [{**p, "text": slim} if p.get("type") == "text" else p for p in m["content"]]}
             out.append(m)
         # Some chat templates insist on user/assistant alternation; merge repeats.
         merged = [out[0]]
@@ -715,6 +1132,10 @@ class Agent:
             prev = merged[-1]
             if m["role"] == prev["role"] and isinstance(m["content"], str) and isinstance(prev["content"], str):
                 merged[-1] = {"role": m["role"], "content": prev["content"] + "\n\n" + m["content"]}
+            elif m["role"] == prev["role"] and isinstance(m["content"], str):  # (screenshot + a note)
+                merged[-1] = {"role": m["role"], "content": prev["content"] + [{"type": "text", "text": m["content"]}]}
+            elif m["role"] == prev["role"] and isinstance(prev["content"], str) and m["role"] != "system":
+                merged[-1] = {"role": m["role"], "content": [{"type": "text", "text": prev["content"]}] + m["content"]}
             else:
                 merged.append(m)
         return merged
@@ -735,23 +1156,93 @@ class Agent:
         if hasattr(self.brain, "max_tokens"):
             self.brain.max_tokens = self.length()[1]
         start_len = len(self.history)
+        asked = user_text
+        watch_note = ""
+        watch_img = False
+        if not auto:
+            user_text = asked = self._question_only(user_text)  # the brain doesn't need "Hej Pitagoras" (it greets back)
+            if wants_quit(asked) and self.on_quit:
+                await self._goodbye()
+                return
+            from . import eyes
+
+            wants_control = (CONTROL_INTENT.search(asked) and not TIMER_RE.search(asked)
+                             and not DISCORD_RE.search(asked)  # (send_discord does it all, no screenshot needed)
+                             and (self.cfg.get("control") or {}).get("enabled", True))
+            if not image and wants_control and eyes.can_see()[0]:
+                # "naciśnij X" / "kliknij": look first (the window with a grid), then click what's really there
+                self.hub.emit("state", state="thinking")
+                image = await asyncio.to_thread(eyes.capture_for_control, tools.ctx.extra.get("char_pos"))
+                note = await _timed(eyes.window_note, default='')
+                user_text += ("\n(Attached: the screen right now." + eyes.GRID_NOTE.format(w=eyes.LAST["w"], h=eyes.LAST["h"],
+                                                                                      g=eyes.GRID)
+                              + note + " If I let you choose ('któryś', 'jakiś'), pick one from the list yourself. "
+                                "If I only said 'naciśnij'/'kliknij', I mean the thing I asked you to press earlier.)")
+                log.info("(click request: looking at the screen first)")
+            elif not image and vague_this(user_text):  # "co myślisz o tym?" / "zobacz": "this" is what's on the screen
+                if eyes.can_see()[0]:
+                    self.hub.emit("state", state="thinking")
+                    image = await asyncio.to_thread(eyes.capture, tools.ctx.extra.get("char_pos"))
+                    note = await _timed(eyes.window_note, 40, False, default='')
+                    user_text += ("\n(Attached: my screen right now. \"This\" means what's on it, unless it clearly "
+                                  "means what we were just talking about. Only look and answer; don't click or do "
+                                  "anything unless I ask." + note + ")")
+                    log.info("(vague 'this': looking at the screen)")
+            elif (not image and time.monotonic() - getattr(self, "_screen_task_at", 0) < 120
+                  and SCREEN_FOLLOW_RE.search(asked) and eyes.can_see()[0]):
+                # right after a screen task: "ale włącz go", "ten drugi", "nie włączyłeś" -> look again, fresh
+                self.hub.emit("state", state="thinking")
+                image = await asyncio.to_thread(eyes.capture_for_control, tools.ctx.extra.get("char_pos"))
+                note = await _timed(eyes.window_note, default='')
+                user_text += ("\n(Attached: the screen right now, since we were just doing something on it."
+                              + eyes.GRID_NOTE.format(w=eyes.LAST["w"], h=eyes.LAST["h"], g=eyes.GRID) + note + ")")
+                log.info("(follow-up to a screen task: looking again)")
+            if self.watching() and not wants_control:
+                # watching together: questions are about what's on screen and what it said about it
+                if not image and eyes.can_see()[0]:
+                    self.hub.emit("state", state="thinking")
+                    image = await asyncio.to_thread(eyes.capture, tools.ctx.extra.get("char_pos"))
+                    watch_img = bool(image)
+                    if image:
+                        user_text += "\n(Attached: the screen right now; we're watching it together.)"
+                heard = await self._video_speech(40)
+                parts = [p for p in (self.watch_memory_note(),
+                                     f'(Said in the video in the last ~40 s: "{heard}")' if heard else "") if p]
+                watch_note = "\n".join(parts)
+                log.info("(watching together: question with the screen%s and %d remembered moments)",
+                         " + video audio" if heard else "", len(self.watch_log))
+        self._saw_screen = bool(image)
+        if image and not auto:
+            self._screen_task_at = time.monotonic()
         self.history.append({"role": "user", "content": self._content(user_text, image)})
         self._hold = "" if auto else None
+        self._said = ""
+        self._parser = None
         self._turn_request = self.history[-1]
         control_steps = int((self.cfg.get("control") or {}).get("max_steps", 40))
         budget = 6  # tool calls per turn; grows to control.max_steps once it's controlling the PC
         nudges, nudge_msgs = 0, []
         task_comments = bool((self.cfg.get("chat") or {}).get("task_comments", False))
         quiet = False
+        if watch_note:  # (internal: not saved in the chat, rebuilt fresh for every question)
+            msg = {"role": "user", "content": watch_note}
+            self.history.append(msg)
+            nudge_msgs.append(msg)
+        ran_tool = False  # any (non-instant) tool used in this turn
+        actions_done = 0
+        parts_asked = 1 if auto else request_parts(asked)  # "otwórz X i odpal Y" = 2 things to do
         acted = False  # did a click/key/type happen since the last screenshot it asked for?
         from .tools import control as _control
         _control.reset()  # the user used the mouse since the last request: that's not "taking over"
-        self._control_turn = bool(not auto and CONTROL_INTENT.search(user_text))
+        self._control_turn = bool(not auto and CONTROL_INTENT.search(asked) and not TIMER_RE.search(asked)
+                                  and not DISCORD_RE.search(asked))
         if self._control_turn and (self.cfg.get("control") or {}).get("enabled", True):
             budget = control_steps  # asked to click/type: it's a control task from the start
+            _control.begin(self.control_banner())
         tools.ctx.extra["control_stopped"] = False
         try:
-            if not auto and not self._control_turn and not image:
+            if (not auto and not self._control_turn and (not image or watch_img)
+                    and not (watch_note and WATCH_REF_RE.search(asked))):
                 self.hub.emit("state", state="thinking")
                 note = await self._fact_check(user_text)  # questions: look it up first, then answer
                 if note:
@@ -764,6 +1255,7 @@ class Agent:
                 self.hub.emit("state", state="thinking")
                 messages = self._messages()
                 parser = StreamParser(list(TOOLS))
+                self._parser = parser
                 raw = ""
                 self._said = ""  # what was actually shown/spoken this step (kept if interrupted)
                 self._mute = quiet  # task done and "task comments" off: don't show/say what comes next
@@ -805,6 +1297,16 @@ class Agent:
                         self.history.append(msg)
                         nudge_msgs.append(msg)
                         continue
+                    # promised an action ("odpalę ci to") but never called a tool: once more, properly
+                    if (not auto and not ran_tool and nudges == 0
+                            and (budget <= 6 or self._control_turn or self._saw_screen)
+                            and (PROMISE_RE.search(scrub(self._said)) or ACK_ONLY_RE.match(scrub(self._said)))):
+                        nudges += 1
+                        log.info("(promised an action without calling a tool: nudging)")
+                        msg = {"role": "user", "content": PROMISE_NUDGE}
+                        self.history.append(msg)
+                        nudge_msgs.append(msg)
+                        continue
                     # controlling the PC but only *talked* about clicking: push it to actually do it
                     if budget > 6 and nudges < 2 and not acted and not DONE_RE.search(raw):
                         nudges += 1
@@ -831,7 +1333,12 @@ class Agent:
                     log.info("tool %s %s", name, args)
                     self.hub.emit("tool", name=name, args=args)
                     self.hub.emit("state", state="working")
-                    result = await run_tool(name, args)
+                    name, args, blocked = self._guard_call(name, args, user_text)
+                    if (blocked is None and name in CONTROL_TOOLS and not auto
+                            and (self.cfg.get("control") or {}).get("enabled", True)):
+                        _control.begin(self.control_banner())  # it can click & type now: show it (and Esc)
+                    result = blocked if blocked is not None else await run_tool(name, args)
+                    ran_tool = True
                     if name in CONTROL_TOOLS or (name == "look_at_screen" and str(args.get("grid")).lower() == "true"):
                         budget = max(budget, control_steps)
                     if name in ACTION_TOOLS and hasattr(self.brain, "max_tokens"):
@@ -844,15 +1351,27 @@ class Agent:
                 image = None
                 if isinstance(result, dict):
                     result, image = result.get("text", ""), result.get("image")
+                    if image:
+                        self._saw_screen = True
+                        self._screen_task_at = time.monotonic()
                 log.info("  -> %s%s", result[:200].replace("\n", " "), " [+screenshot]" if image else "")
                 if call and name in ACTION_TOOLS:
                     ok = not FAILED_RE.match(str(result))
                     # task comments off: once a task succeeded, whatever comes next stays unsaid
                     # (it can still call more tools; a failure is still told to the user)
                     quiet = ok and not task_comments
+                    actions_done += ok
+                    if ok and name == "open_youtube_channel" and str(result).startswith("playing"):
+                        actions_done = parts_asked  # channel + a video from it: both parts in one go
+                    if ok and name == "start_timer" and args.get("then"):
+                        actions_done = parts_asked  # "…i naciśnij spację" is the timer's action, for LATER
                     if name not in CONTROL_TOOLS:
-                        result += ("\n(Done.)" if quiet else
-                                   "\n(Done. Now say at most ONE short sentence, max 8 words, no questions.)")
+                        if ok and actions_done < parts_asked:  # "włącz kanał X i odpal jakiś film": not finished yet
+                            result += (f"\n(Done. But the request has more parts ({asked!r}): do the NEXT part now "
+                                       "with the right tool, without talking. If this tool already did all of it, stop.)")
+                        else:
+                            result += ("\n(Done.)" if quiet else
+                                       "\n(Done. Now say at most ONE short sentence, max 8 words, no questions.)")
                 text = f'<tool_result name="{name}">\n{result}\n</tool_result>'
                 self.history.append({"role": "user", "content": self._content(text, image)})
                 if tools.ctx.extra.get("control_stopped"):  # the user grabbed the mouse: hand it back
@@ -884,15 +1403,22 @@ class Agent:
             if self.speaker:
                 self.speaker.say(self.phrase("Sorki, coś mi się zacięło w głowie.", "Sorry, my brain glitched."))
         finally:
+            _control.end()  # hide its cursor + the Esc banner
             self._hold = None
             self._mute = False
             self.busy = False
             if nudge_msgs:  # internal reminders don't belong in the saved chat
                 self.history = [m for m in self.history if not any(m is n for n in nudge_msgs)]
+            saw = ""
+            if auto:
+                p = getattr(self, "_parser", None)
+                saw = " ".join(p.thoughts).strip() if p else ""
+                if user_text.startswith("[Watch-along"):
+                    self.remember_watch(user_text, saw, scrub(getattr(self, "_said", "")))
             if auto and len(self.history) > start_len and self.history[start_len]["role"] == "user":
                 # keep what it saw, drop the instructions (the screenshot stays for follow-up questions)
                 c = self.history[start_len]["content"]
-                summary = auto_summary(user_text)
+                summary = auto_summary(user_text, saw)
                 self.history[start_len]["content"] = (
                     [{**p, "text": summary} if p.get("type") == "text" else p for p in c] if isinstance(c, list) else summary)
             self.save()
@@ -902,14 +1428,113 @@ class Agent:
             if asyncio.current_task() is self.turn:  # (not when a newer request replaced this one)
                 self.on_turn(False)
 
+    def _guard_call(self, name: str, args: dict, user_text: str) -> tuple[str, dict, str | None]:
+        """Fix the small brain's typical slips before they happen. Returns (name, args, result-if-blocked)."""
+        if DISCORD_RE.search(user_text.split("\n")[0]) and name in (
+                "send_discord", "type_text", "press_keys", "click_on", "open_app", "open_website"):
+            from .tools.discord_chat import parse_request
+
+            p = parse_request(user_text.split("\n")[0])
+            if name != "send_discord":
+                if not p.get("message") or not (p.get("channel") or p.get("to")):
+                    return name, args, None
+                log.info("(Discord request: send_discord instead of %s)", name)
+                name, args = "send_discord", {}
+            # where and what from the user's own words: the brain likes to translate or "fix" the message
+            if args.get("to"):
+                p.pop("to", None)  # (the brain's "Adam" beats the parsed "Adama")
+            args = {**args, **{k: v for k, v in p.items() if v}}
+            if args.get("channel") and not p.get("to"):
+                args.pop("to", None)  # a channel was named: never ALSO a DM (it invents "to" sometimes)
+            return name, args, None
+        if name in ("click", "drag", "move_mouse") and not getattr(self, "_saw_screen", False):
+            # x,y only mean something on a screenshot it has seen in this request; otherwise it's a random click
+            log.info("(blocked a blind %s: no screenshot in this request)", name)
+            return name, args, ("Not done: you haven't seen the screen in this request, so those coordinates are a "
+                                "guess. Use click_on with the button's text, or look_at_screen grid=true first.")
+        if name == "play_on_spotify" and NOT_SPOTIFY_RE.search(user_text) and not SPOTIFY_RE.search(user_text):
+            log.info("(blocked play_on_spotify: the user asked for YouTube/video, not music)")
+            return name, args, "Not done: the user asked for YouTube / a video, not Spotify. Don't play music."
+        if (name == "open_youtube" and str(args.get("play", "true")).lower() in ("true", "1", "yes")
+                and re.search(r"\b(jaki[śs]|jakie[śs]|losow\w*|cokolwiek|any|random|some)\b", user_text, re.I)):
+            args = {**args, "play": "random"}  # "puść jakiś film z minecrafta": not always the same top video
+        by = BY_YOUTUBER_RE.search(user_text.split("\n")[0])
+        if name == "open_youtube" and by:
+            # "film z fnaf od Elevena" searched in general: it means that YouTuber's own videos
+            who = by.group(1)
+            about = re.sub(rf"(?i)\b{re.escape(who[:max(4, len(who) - 2)])}\w*\b", "", str(args.get("query", "")))
+            about = re.sub(r"(?i)\b(od|by|film\w*|odcin\w*|wideo|video|youtube|yt|gry|gra|z|ze|o)\b", " ", about)
+            about = re.sub(r"\s+", " ", about).strip(" ,.")
+            about = video_topic(user_text.split("\n")[0], who) or about
+            log.info("(open_youtube with a YouTuber named: using their channel: %s / %s)", who, about)
+            name, args = "open_youtube_channel", {"name": who, "about": about, "play": "random"}
+        if name == "open_youtube_channel" and (args.get("about") or by):
+            # the small brain shortens "teorię FNAF 3" to "FNAF": take the topic from the user's own words
+            said = video_topic(user_text.split("\n")[0], str(args.get("name", "")))
+            mine = str(args.get("about") or "")
+            if said and len(said.split()) > len(mine.split()):
+                log.info("(video topic from the user's words: %r instead of %r)", said, mine)
+                args = {**args, "about": said}
+            if args.get("about"):
+                anyone = re.search(r"\b(jaki[śs]|jakie[śs]|losow\w*|cokolwiek|any|random|some)\b", user_text, re.I)
+                from .tools.web import _tokens
+
+                if str(args.get("play", "")).lower() in ("", "random", "true") or not args.get("play"):
+                    specific = len(_tokens(str(args["about"]))) >= 2  # "teoria fnaf 3": that video, not any
+                    args = {**args, "play": "best" if specific and not anyone else "random"}
+        if name == "open_youtube_channel":
+            # "drugi najnowszy film od X": the small brain drops the "drugi" (or the "najnowszy"); read it from the user
+            from .tools.web import video_rank
+
+            ranked = video_rank(user_text.split("\n")[0])
+            if ranked:
+                mode, nth = ranked
+                if str(args.get("play", "")).lower() not in (mode,) or int(args.get("nth") or 1) != nth:
+                    log.info("(video rank from the user's words: %s #%d)", mode, nth)
+                args = {**args, "play": mode, "nth": nth}
+                if args.get("about") and not video_topic(user_text.split("\n")[0], str(args.get("name", ""))):
+                    args.pop("about")  # (the brain put "najnowszy" in about)
+        if (name == "open_youtube_channel" and args.get("play") and not args.get("about") and not args.get("nth")
+                and not WANTS_VIDEO_RE.search(user_text)):
+            # "odpal kanał Blowka": just the channel, they didn't ask for a video
+            args = {k: v for k, v in args.items() if k != "play"}
+        if (name == "open_youtube" and not WANTS_VIDEO_RE.search(user_text)
+                and not re.search(r"\b(o|about|z|ze|with)\s+\w+", user_text.split("youtub")[-1], re.I)):
+            # just "otwórz YouTube": the site, not a video it made up a topic for
+            return "open_website", {"site": "youtube"}, None
+        if name == "start_timer" and args.get("then"):
+            # an action for later only if the user asked for one (it copied "naciśnij spację" from the examples)
+            then_words = [w for w in re.findall(r"\w{3,}", _fold_pl(str(args["then"])))]
+            asked_words = set(re.findall(r"\w{3,}", _fold_pl(user_text)))
+            if then_words and sum(any(a[:5] == w[:5] for a in asked_words) for w in then_words) < len(then_words) / 2:
+                log.info("(dropped a timer action the user didn't ask for: %r)", args["then"])
+                args = {k: v for k, v in args.items() if k != "then"}
+        if name == "click_on":
+            target = str(args.get("target") or args.get("text") or "")
+            key = KEY_NAMES.get(re.sub(r"[^\w ]", "", target.lower()).strip())
+            if key:  # "naciśnij spację" is a key, not a button on the screen
+                log.info("(click_on %r -> press_keys %s)", target, key)
+                return "press_keys", {"keys": key}, None
+            from .tools import web  # "clicking" a web_search result that isn't on the screen -> open its page
+
+            url = web.result_url(target)
+            if url:
+                log.info("(click_on a search result -> open_website %s)", url)
+                return "open_website", {"site": url}, None
+        return name, args, None
+
     def _question_only(self, text: str) -> str:
         """'Hej Pitagoras, kto wygrał mundial?' -> 'kto wygrał mundial?' (the search doesn't need my name)."""
         words = text.split()
-        name = self.wake_phrase.split()[-1]
+        parts = self.wake_phrase.split()
+        name, greetings = parts[-1], self.GREETINGS | set(parts[:-1])
         for i, w in enumerate(words[:4]):
             bare = re.sub(r"[^\w]", "", w.lower())
             if bare in self.aliases or (len(bare) >= 5 and difflib.SequenceMatcher(None, bare, name).ratio() >= 0.7):
-                return " ".join(words[i + 1:]).strip(" ,.!") or text
+                # only when everything before the name is a greeting ("Hej, Pitagoras, …"), not "co myślisz o Pitagorasie"
+                if all(re.sub(r"[^\w]", "", x.lower()) in greetings for x in words[:i]):
+                    return " ".join(words[i + 1:]).strip(" ,.!") or text
+                break
         return text
 
     async def _fact_check(self, user_text: str) -> str | None:
@@ -920,17 +1545,34 @@ class Agent:
         if not wants_fact_check(q):
             return None
         from .tools import web
-        region = "pl-pl" if self.phrase("pl", "en") == "pl" else "wt-wt"
-        self.hub.emit("tool", name="web_search", args={"query": q})
-        try:
-            results = await asyncio.wait_for(asyncio.to_thread(web.search, q, 5, region), timeout=5)
-        except Exception as e:  # noqa: BLE001 (offline, slow, blocked: just answer from memory)
-            log.info("fact check search failed: %s", e)
-            return None
+        polish = self.phrase("pl", "en") == "pl"
+        region = "pl-pl" if polish else "wt-wt"
+        rec = wants_recommendation(q)
+        query = rec_query(q, polish) if rec else q  # what people recommend now, not "poleć mi…" word for word
+        self.hub.emit("tool", name="web_search", args={"query": query})
+        results = []
+        for attempt in range(2):  # the search engine hiccups now and then: one quick retry
+            try:
+                results = await asyncio.wait_for(asyncio.to_thread(web.search, query, 6 if rec else 5, region, True),
+                                                 timeout=4)
+            except Exception as e:  # noqa: BLE001 (offline, slow, blocked: just answer from memory)
+                log.info("fact check search failed (%s): %s", attempt + 1, e)
+            if results:
+                break
         if not results:
             return None
-        log.info("fact check: searched %r (%d results)", q, len(results))
+        log.info("%s: searched %r (%d results)", "recommendation" if rec else "fact check", query, len(results))
         text = "\n".join(f"- {r.get('title', '')}: {r.get('body', '')}" for r in results)
+        if rec:  # the results are "TOP 10 …" headlines: read the top two lists for the actual titles
+            async def read(url: str) -> str:
+                try:
+                    page = await asyncio.wait_for(asyncio.to_thread(web.read_webpage, url), timeout=4)
+                    return "" if page.startswith("Could not") else page[:1600]
+                except Exception:  # noqa: BLE001
+                    return ""
+            pages = await asyncio.gather(*(read(r["href"]) for r in results[:2] if r.get("href")))
+            text += "".join(f"\n\nFrom {results[i].get('title', '')}:\n{p}" for i, p in enumerate(pages) if p)
+            return REC_NOTE.format(results=text[:5000])
         return FACT_NOTE.format(results=text[:2500])
 
     def _take_calls(self, parser: StreamParser) -> tuple | None:

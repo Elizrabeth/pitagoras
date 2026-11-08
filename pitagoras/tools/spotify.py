@@ -148,17 +148,45 @@ def _norm(s: str) -> str:
     return re.sub(r"[^\w]+", "", s.lower().replace("’", "'"))
 
 
-def _spotify_window():
-    import psutil as _ps
-    from pywinauto import Desktop
+def _spotify_hwnd() -> int | None:
+    """Spotify's main window, found with plain Win32 calls (never asks other windows anything:
+    a hung window, e.g. a game, used to freeze the UI Automation scan of all windows forever)."""
+    import ctypes
+    from ctypes import wintypes
 
-    for w in Desktop(backend="uia").windows(class_name="Chrome_WidgetWin_1"):
-        try:
-            if _ps.Process(w.element_info.process_id).name().lower() == "spotify.exe" and w.window_text():
-                return w
-        except Exception:  # noqa: BLE001
-            continue
-    return None
+    pids = {p.pid for p in psutil.process_iter(["name"]) if (p.info.get("name") or "").lower() == "spotify.exe"}
+    if not pids:
+        return None
+    user32 = ctypes.windll.user32
+    found: list[int] = []
+
+    @ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+    def each(hwnd, _):
+        pid = wintypes.DWORD()
+        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+        if pid.value in pids and user32.GetWindowTextLengthW(hwnd) > 0:
+            cls = ctypes.create_unicode_buffer(64)
+            user32.GetClassNameW(hwnd, cls, 64)
+            if cls.value == "Chrome_WidgetWin_1":
+                found.append(int(hwnd))
+                return False
+        return True
+
+    user32.EnumWindows(each, 0)
+    return found[0] if found else None
+
+
+def _spotify_window():
+    from pywinauto.controls.uiawrapper import UIAWrapper
+    from pywinauto.uia_element_info import UIAElementInfo
+
+    hwnd = _spotify_hwnd()
+    if not hwnd:
+        return None
+    try:
+        return UIAWrapper(UIAElementInfo(hwnd))
+    except Exception:  # noqa: BLE001
+        return None
 
 
 def press_page_play(label: str, timeout: float = 10, cards: bool = True, allow_plain: bool = True) -> str:
@@ -205,6 +233,47 @@ def press_page_play(label: str, timeout: float = 10, cards: bool = True, allow_p
             log.debug("ui automation: %s", e)
         time.sleep(0.4)
     return "failed"
+
+
+def _safe_click(window, button) -> bool:
+    """A real mouse click on a Spotify element, but only when it can't land anywhere else: Spotify not minimized,
+    brought to the front, and the element fully inside Spotify's window and visible. The mouse goes back after.
+    (Clicking blindly at an element's position used to click random things when Spotify was hidden or scrolled.)"""
+    import ctypes
+    from ctypes import wintypes
+
+    from . import control
+
+    try:
+        if window.is_minimized():
+            return False
+        window.set_focus()
+        time.sleep(0.25)
+        wr, br = window.rectangle(), button.rectangle()
+        inside = (br.width() > 4 and br.height() > 4 and br.left >= wr.left and br.right <= wr.right
+                  and br.top >= wr.top and br.bottom <= wr.bottom)
+        if not inside or not button.is_visible():
+            log.info("not clicking '%s': it isn't visible inside Spotify's window", button.window_text())
+            return False
+        x, y = (br.left + br.right) // 2, (br.top + br.bottom) // 2
+        user32 = ctypes.windll.user32
+        user32.WindowFromPoint.argtypes = [wintypes.POINT]
+        user32.WindowFromPoint.restype = wintypes.HWND
+        user32.GetAncestor.argtypes = [wintypes.HWND, ctypes.c_uint]
+        user32.GetAncestor.restype = wintypes.HWND
+        root = user32.GetAncestor(user32.WindowFromPoint(wintypes.POINT(x, y)), 2)  # GA_ROOT
+        if not root or int(root) != int(window.handle):  # something else is on top of that spot
+            log.info("not clicking '%s': another window covers it", button.window_text())
+            return False
+        old = control._cursor()
+        button.click_input()
+        if old:
+            ctypes.windll.user32.SetCursorPos(*old)
+        control.reset()  # (our own mouse move isn't the user taking over)
+        return True
+    except Exception as e:  # noqa: BLE001
+        log.debug("safe click failed: %s", e)
+        return False
 
 
 LIB_RE = re.compile(r"^(.*?)\s+(?:Pinned\s+)?(Playlist|Album|Artist|Podcast)(?:\s+•\s+(.*))?$")
@@ -257,7 +326,10 @@ def play_from_library(query: str) -> str | None:
     # open its page, then press *that page's* "Play <name>" (never another page's button)
     for opener in ("invoke", "click"):
         try:
-            b.invoke() if opener == "invoke" else b.click_input()  # click_input: a real click if invoke didn't open it
+            if opener == "invoke":
+                b.invoke()
+            elif not _safe_click(w, b):  # a real click only if it lands exactly on that sidebar item
+                continue
         except Exception as e:  # noqa: BLE001
             log.debug("library open (%s) failed: %s", opener, e)
             continue
@@ -308,7 +380,10 @@ async def open_and_play(uri: str, label: str) -> bool:
         os.startfile(uri)
     for attempt in range(2):  # press the page's Play button; check it really started; once more if not
         # (for a song never press the "Play <album>" cards in "More by …": that plays a different song)
-        res = await asyncio.to_thread(press_page_play, label, 8 if attempt == 0 else 5, not track)
+        try:
+            res = await asyncio.wait_for(asyncio.to_thread(press_page_play, label, 8 if attempt == 0 else 5, not track), 20)
+        except asyncio.TimeoutError:
+            res = "timed out"
         log.info("page play button (try %d): %s", attempt + 1, res)
         if await _started(before, label, track, 4):
             return True
@@ -326,7 +401,10 @@ async def play_on_spotify(query: str, kind: str = "track") -> str:
         await ensure_running()
         before = await now_playing()
         try:
-            name = await asyncio.to_thread(play_from_library, query)
+            name = await asyncio.wait_for(asyncio.to_thread(play_from_library, query), 20)
+        except asyncio.TimeoutError:
+            log.warning("library lookup took too long; searching Spotify instead")
+            name = None
         except Exception as e:  # noqa: BLE001
             log.warning("library lookup failed: %s", e)
             name = None

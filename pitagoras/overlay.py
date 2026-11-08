@@ -30,7 +30,7 @@ WANDER_SECONDS = (90, 300)  # idle time before it teleports somewhere else (rand
 
 # ── colors (appearance.json) ────────────────────────────────
 DEFAULT_COLORS = {"body": [255, 210, 63], "mouth": [21, 21, 21], "outline": [120, 85, 0],
-                  "listening_ring": [90, 209, 154]}
+                  "listening_ring": [90, 209, 154], "cursor": [124, 92, 255]}
 COLOR_HELP = ("Pitagoras' colors. Each one is [r, g, b] (0-255), \"#rrggbb\" or \"rgb(r, g, b)\". "
               "Saved changes show up right away. Or use right-click > Settings > Colors.")
 
@@ -274,6 +274,205 @@ class ChatBox(QWidget):
 
 
 # ── the character ───────────────────────────────────────────
+# ── PC control: Pitagoras's own cursor + the "press Esc" frame ──────────────
+GHOST_FLAGS = (Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool | Qt.WindowTransparentForInput
+               | Qt.WindowDoesNotAcceptFocus)
+
+
+def _ghost(w: QWidget) -> None:
+    """Click-through, never takes focus, and left out of screenshots (so Pitagoras's own eyes and its
+    on-screen text reading don't see its cursor or the banner)."""
+    w.setAttribute(Qt.WA_TranslucentBackground)
+    w.setAttribute(Qt.WA_ShowWithoutActivating)
+    w.setAttribute(Qt.WA_TransparentForMouseEvents)
+
+
+def _exclude_from_capture(w: QWidget) -> None:
+    try:
+        import ctypes
+
+        ctypes.windll.user32.SetWindowDisplayAffinity(int(w.winId()), 0x11)  # WDA_EXCLUDEFROMCAPTURE
+    except Exception:  # noqa: BLE001  (older Windows: it just shows up in screenshots)
+        pass
+
+
+class ControlCursor(QWidget):
+    """A colored arrow with a name tag that sits on the real cursor while Pitagoras is in control.
+    The real cursor glides (the backend moves it smoothly), this follows it every frame."""
+    ARROW = [(0, 0), (0, 21), (5, 16.5), (8.6, 24.5), (12.2, 23), (8.7, 15.2), (15, 15.2)]
+
+    def __init__(self):
+        super().__init__(None, GHOST_FLAGS)
+        _ghost(self)
+        self.setFixedSize(300, 90)
+        self.color = QColor(124, 92, 255)
+        self.label, self.label_until = "", 0.0
+        self.ripples: list[tuple[float, bool]] = []  # (start time, right button)
+        self.pad = 30  # room around the tip for the click ripple
+        self.timer = QTimer(self, interval=12, timeout=self.follow)
+
+    def start(self):
+        self.follow()
+        self.show()
+        _exclude_from_capture(self)
+        self.timer.start()
+
+    def stop(self):
+        self.timer.stop()
+        self.hide()
+        self.ripples.clear()
+
+    def follow(self):
+        p = QCursor.pos()
+        self.move(p.x() - self.pad, p.y() - self.pad)
+        now = time.monotonic()
+        self.ripples = [r for r in self.ripples if now - r[0] < 0.55]
+        self.update()
+
+    def click(self, right: bool = False, double: bool = False):
+        now = time.monotonic()
+        self.ripples.append((now, right))
+        if double:
+            self.ripples.append((now + 0.12, right))
+
+    def set_label(self, text: str):
+        self.label, self.label_until = text, time.monotonic() + (2.5 if text else 0)
+
+    def paintEvent(self, _):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        tip = QPointF(self.pad, self.pad)
+        now = time.monotonic()
+        for t0, right in self.ripples:  # expanding ring on every click
+            u = (now - t0) / 0.55
+            if 0 <= u <= 1:
+                c = QColor(self.color)
+                c.setAlphaF(0.85 * (1 - u))
+                p.setPen(QPen(c, 3 * (1 - u) + 1))
+                p.setBrush(Qt.NoBrush)
+                r = 6 + 22 * u
+                p.drawEllipse(tip, r, r)
+        # the arrow: a bit bigger than Windows' own, so it frames the real cursor in your color
+        path = QPainterPath()
+        s = 1.25
+        path.moveTo(tip + QPointF(*self.ARROW[0]) * s)
+        for pt in self.ARROW[1:]:
+            path.lineTo(tip + QPointF(*pt) * s)
+        path.closeSubpath()
+        p.translate(1.5, 2)
+        p.fillPath(path, QColor(0, 0, 0, 70))  # soft shadow
+        p.translate(-1.5, -2)
+        p.setPen(QPen(QColor(255, 255, 255), 1.6, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+        p.setBrush(self.color)
+        p.drawPath(path)
+        # name tag (or what it's doing: "⌨ hello", "Ctrl+C")
+        text = self.label if self.label and now < self.label_until else "Pitagoras"
+        f = QFont("Segoe UI", 9, QFont.DemiBold)
+        p.setFont(f)
+        fm = p.fontMetrics()
+        w = min(fm.horizontalAdvance(text) + 16, self.width() - self.pad - 22)
+        box = QRectF(self.pad + 17, self.pad + 22, w, fm.height() + 6)
+        p.setPen(Qt.NoPen)
+        p.setBrush(self.color)
+        p.drawRoundedRect(box, box.height() / 2, box.height() / 2)
+        light = self.color.lightnessF() > 0.62
+        p.setPen(QColor(20, 20, 20) if light else QColor(255, 255, 255))
+        p.drawText(box.adjusted(8, 0, -8, 0), Qt.AlignVCenter | Qt.AlignLeft,
+                   fm.elidedText(text, Qt.ElideLeft, int(w - 16)))
+
+
+class ControlFrame(QWidget):
+    """A glowing border around the screen and a banner at the top: 'Naciśnij Esc, aby wyjść z trybu kontroli'."""
+
+    def __init__(self):
+        super().__init__(None, GHOST_FLAGS)
+        _ghost(self)
+        self.color = QColor(124, 92, 255)
+        self.text = "Naciśnij Esc, aby wyjść z trybu kontroli"
+        self.screen_ = None
+        self.t0 = time.monotonic()
+        self.timer = QTimer(self, interval=500, timeout=self.check_screen)
+
+    def start(self, text: str):
+        self.text = text or self.text
+        self.t0 = time.monotonic()
+        self.screen_ = None
+        self.check_screen()
+        self.show()
+        _exclude_from_capture(self)
+        self.timer.start()
+
+    def stop(self):
+        self.timer.stop()
+        self.hide()
+
+    def check_screen(self):
+        """Stay on the screen where the action is (where the cursor is)."""
+        scr = QApplication.screenAt(QCursor.pos()) or QApplication.primaryScreen()
+        if scr is not self.screen_:
+            self.screen_ = scr
+            self.setGeometry(scr.geometry())
+            self.update()
+
+    def paintEvent(self, _):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        r = QRectF(self.rect())
+        for i, a in enumerate((150, 70, 30)):  # border with a soft inner glow
+            c = QColor(self.color)
+            c.setAlpha(a)
+            p.setPen(QPen(c, 3))
+            p.setBrush(Qt.NoBrush)
+            p.drawRect(r.adjusted(1.5 + 3 * i, 1.5 + 3 * i, -1.5 - 3 * i, -1.5 - 3 * i))
+        # banner: [Esc] Naciśnij Esc, aby wyjść z trybu kontroli
+        f = QFont("Segoe UI", 11, QFont.DemiBold)
+        p.setFont(f)
+        fm = p.fontMetrics()
+        kf = QFont("Segoe UI", 9, QFont.Bold)
+        key_w = 40
+        tw = fm.horizontalAdvance(self.text)
+        bw, bh = tw + key_w + 52, fm.height() + 18
+        box = QRectF((r.width() - bw) / 2, 16, bw, bh)
+        p.setPen(QPen(self.color, 2))
+        p.setBrush(QColor(24, 27, 33, 235))
+        p.drawRoundedRect(box, bh / 2, bh / 2)
+        dot = QPointF(box.left() + 18, box.center().y())  # "live" dot in the cursor color
+        p.setPen(Qt.NoPen)
+        p.setBrush(self.color)
+        p.drawEllipse(dot, 5, 5)
+        key = QRectF(box.left() + 32, box.center().y() - 11, key_w, 22)
+        p.setBrush(QColor(255, 255, 255))
+        p.drawRoundedRect(key, 5, 5)
+        p.setPen(QColor(25, 25, 25))
+        p.setFont(kf)
+        p.drawText(key, Qt.AlignCenter, "Esc")
+        p.setPen(QColor(240, 243, 247))
+        p.setFont(f)
+        p.drawText(QRectF(key.right() + 10, box.top(), tw + 4, bh), Qt.AlignVCenter | Qt.AlignLeft, self.text)
+
+
+class ControlOverlay:
+    def __init__(self):
+        self.cursor = ControlCursor()
+        self.frame = ControlFrame()
+        self.on = False
+
+    def set_color(self, c: QColor):
+        self.cursor.color = self.frame.color = QColor(c)
+        self.cursor.update()
+        self.frame.update()
+
+    def start(self, text: str = ""):
+        self.on = True
+        self.frame.start(text)
+        self.cursor.start()
+
+    def stop(self):
+        self.on = False
+        self.frame.stop()
+        self.cursor.stop()
+
+
 class Character(QWidget):
     def __init__(self, port: int, size: int = 150):
         super().__init__(None, POPUP_FLAGS)
@@ -332,6 +531,8 @@ class Character(QWidget):
         self.wander = self.store.value("wander", True, type=bool)
         self.colors = load_colors()
         self.colors_mtime = self._appearance_mtime()
+        self.ctl = ControlOverlay()  # its cursor + "press Esc" banner while it clicks & types
+        self.ctl.set_color(self.colors["cursor"])
         QTimer(self, interval=1000, timeout=self.check_appearance).start()  # pick up edits to the file
         pos = self.store.value("pos")
         if isinstance(pos, QPoint) and QApplication.screenAt(pos + QPoint(10, 10)):
@@ -401,6 +602,18 @@ class Character(QWidget):
         elif t == "timers":
             self.timer_panel.set_timers(m.get("timers") or [])
             self.place_popups()
+        elif t == "control":
+            if m.get("on"):
+                self.ctl.start(m.get("text") or "")
+            else:
+                self.ctl.stop()
+            return
+        elif t == "control_click":
+            self.ctl.cursor.click(m.get("button") == "right", bool(m.get("double")))
+            return
+        elif t == "control_label":
+            self.ctl.cursor.set_label(m.get("text") or "")
+            return
         self.update()
 
     # ── animation ───────────────────────────────────────────
@@ -854,6 +1067,8 @@ class Character(QWidget):
         em = m.addMenu("👂  Ears")
         em.setStyleSheet(MENU_CSS)
         self._radio(em, opt.get("ears", []), cur.get("ears"), "ears")
+        em.addSeparator()
+        em.addAction("✏  My words (names it should hear right)…", lambda: self.link.send("edit_words"))
         es = cur.get("ears_status", "")
         if es.startswith("error"):
             em.addAction("⚠ " + es[7:90]).setEnabled(False)
@@ -866,6 +1081,9 @@ class Character(QWidget):
         ey = m.addMenu("👁  Eyes")
         ey.setStyleSheet(MENU_CSS)
         self._radio(ey, opt.get("eyes", []), cur.get("eyes"), "eyes")
+        sc = ey.addMenu("🖥  Which screen")
+        sc.setStyleSheet(MENU_CSS)
+        self._radio(sc, opt.get("eyes_screen", []), cur.get("eyes_screen", "mouse"), "eyes_screen")
         if not cur.get("brain_vision"):
             ey.addSeparator()
             ey.addAction("The current brain can't see; pick one marked 👁").setEnabled(False)
@@ -974,7 +1192,7 @@ class Character(QWidget):
 
         col = self._sub(s, "🎨  Colors")
         for key, label in (("body", "Body color…"), ("mouth", "Mouth color…"), ("outline", "Outline color…"),
-                           ("listening_ring", "Listening ring color…")):
+                           ("listening_ring", "Listening ring color…"), ("cursor", "Cursor color (when it clicks)…")):
             a = col.addAction(label, lambda k=key, t=label: self.pick_color(k, t.rstrip("…")))
             a.setIcon(self._swatch(self.colors[key]))
         col.addSeparator()
@@ -999,7 +1217,9 @@ class Character(QWidget):
         pc = QAction("🖱  Let Pitagoras use mouse & keyboard", s, checkable=True, checked=bool(cur.get("pc_control", True)))
         pc.triggered.connect(lambda c: self._send_set("pc_control", c))
         s.addAction(pc)
-        s.addAction("      (move the mouse yourself to take over)").setEnabled(False)
+        s.addAction("      (press Esc or move the mouse yourself to take over)").setEnabled(False)
+        cc = s.addAction("      Its cursor color…", lambda: self.pick_color("cursor", "Cursor color"))
+        cc.setIcon(self._swatch(self.colors["cursor"]))
         wa = QAction("🎲  Teleport around when idle", s, checkable=True, checked=self.wander)
         wa.triggered.connect(self.set_wander)
         s.addAction(wa)
@@ -1035,6 +1255,7 @@ class Character(QWidget):
         if mt != self.colors_mtime:
             self.colors_mtime = mt
             self.colors = load_colors()
+            self.ctl.set_color(self.colors["cursor"])
             self.update()
 
     def pick_color(self, key: str, title: str):
@@ -1043,7 +1264,15 @@ class Character(QWidget):
         dlg.setWindowFlags(dlg.windowFlags() | Qt.WindowStaysOnTopHint)
         original = dict(self.colors)
         dlg.currentColorChanged.connect(lambda c: self._preview_color(key, c))  # live preview
-        if dlg.exec() == QColorDialog.Accepted:
+        preview = key == "cursor" and not self.ctl.on
+        if preview:  # show its cursor (on yours) while you pick
+            self.ctl.cursor.start()
+        try:
+            accepted = dlg.exec() == QColorDialog.Accepted
+        finally:
+            if preview:
+                self.ctl.cursor.stop()
+        if accepted:
             c = dlg.selectedColor()
             data = read_appearance()
             data[key] = [c.red(), c.green(), c.blue()]
@@ -1051,6 +1280,7 @@ class Character(QWidget):
             self.check_appearance()
         else:
             self.colors = original
+            self.ctl.set_color(self.colors["cursor"])
             self.update()
 
     def _preview_color(self, key: str, c: QColor):
@@ -1061,6 +1291,7 @@ class Character(QWidget):
             self.colors.update({k: parse_color(v) for k, v in data.items()})
             self.colors["body_light"] = QColor(*(int(x + (255 - x) * 0.6) for x in (body.red(), body.green(), body.blue())))
             self.colors["body_dark"] = body.darker(118)
+            self.ctl.set_color(self.colors["cursor"])
             self.update()
 
     def open_appearance(self):

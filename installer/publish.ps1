@@ -1,7 +1,7 @@
 # Uploads Pitagoras to GitHub and publishes a release with the installer.
 #   first time:   .\installer\publish.ps1 -Version 1.0.0 -Create
 #   new version:  .\installer\build.ps1 -Version 1.1.0 ... ; then .\installer\publish.ps1 -Version 1.1.0
-param([string]$Version = "1.0.0", [string]$Repo = "pitagoras", [switch]$Create)
+param([string]$Version = "1.0.0", [string]$Repo = "pitagoras", [switch]$Create, [string]$Changes = "")
 $ErrorActionPreference = "Stop"
 $root = Split-Path $PSScriptRoot -Parent
 Set-Location $root
@@ -44,5 +44,6 @@ $notes = @"
 Needs Windows 10/11 x64, ~15 GB free, and an NVIDIA GPU for local brains and fast ears.
 Windows SmartScreen may warn because the installer isn't code-signed: **More info → Run anyway**.
 "@
+if ($Changes) { $notes = "## What's new`n`n$Changes`n`n$notes" }
 & $gh release create "v$Version" $installer --repo "$login/$Repo" --title "Pitagoras $Version" --notes $notes
 Write-Host "`nDone: https://github.com/$login/$Repo" -ForegroundColor Green

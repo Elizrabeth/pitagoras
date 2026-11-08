@@ -19,4 +19,6 @@ memory/
 settings.yaml
 appearance.json
 personality.txt
+installer/personal/
 overlay.ini
+my_words.txt

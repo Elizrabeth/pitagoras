@@ -57,6 +57,9 @@ def describe_tools() -> str:
     return "\n".join(lines)
 
 
+TOOL_TIMEOUT = 90  # seconds
+
+
 async def run_tool(name: str, args: dict) -> str | dict:
     """Returns text, or {"text": ..., "image": <base64 jpeg>} for tools that show the model a picture."""
     t = TOOLS.get(name)
@@ -65,10 +68,14 @@ async def run_tool(name: str, args: dict) -> str | dict:
     sig = inspect.signature(t.fn)
     args = {k: v for k, v in (args or {}).items() if k in sig.parameters}
     try:
+        # a safety net: a tool stuck on a hung window must never freeze Pitagoras (and its ears) forever
         if inspect.iscoroutinefunction(t.fn):
-            result = await t.fn(**args)
+            result = await asyncio.wait_for(t.fn(**args), TOOL_TIMEOUT)
         else:
-            result = await asyncio.to_thread(t.fn, **args)
+            result = await asyncio.wait_for(asyncio.to_thread(t.fn, **args), TOOL_TIMEOUT)
+    except asyncio.TimeoutError:
+        log.warning("tool %s took over %ds: gave up on it", name, TOOL_TIMEOUT)
+        return f"Error: {name} got stuck (no answer in {TOOL_TIMEOUT}s); it probably didn't work."
     except TypeError as e:
         return f"Error: bad arguments for {name}: {e}"
     except Exception as e:  # noqa: BLE001
@@ -81,5 +88,5 @@ async def run_tool(name: str, args: dict) -> str | dict:
 
 def load_all() -> None:
     """Import tool modules so their @tool decorators register."""
-    from . import character, control, media, spotify, system, timers, web  # noqa: F401
+    from . import character, control, discord_chat, media, spotify, system, timers, web  # noqa: F401
     from .. import eyes, memory, watch  # noqa: F401

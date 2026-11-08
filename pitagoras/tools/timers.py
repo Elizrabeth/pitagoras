@@ -40,13 +40,18 @@ async def _ring(tid: int) -> None:
         return
     TIMERS.pop(tid, None)
     _emit()
-    msg = t["message"] or f"{t['label']}: time's up!"
-    log.info("timer done: %s", t["label"])
+    then = (t.get("then") or "").strip()
+    msg = t["message"] or ("" if then else f"{t['label']}: time's up!")
+    log.info("timer done: %s%s", t["label"], f" -> {then}" if then else "")
     agent = ctx.extra.get("agent")
-    if agent is not None:
+    if agent is None:
+        ctx.hub.emit("toast", text=msg or then)
+        return
+    if msg:
         agent.announce(msg)
-    else:
-        ctx.hub.emit("toast", text=msg)
+    if then:  # "ustaw timer na 10 sekund i naciśnij spację": now do it
+        ctx.hub.emit("toast", text=f"⏰ {then}")
+        await agent.do_later(then)
 
 
 def _find(label: str) -> list[int]:
@@ -57,12 +62,15 @@ def _find(label: str) -> list[int]:
 
 
 @tool("Start a countdown timer, e.g. to track a cooldown in a game (look the cooldown up first with web_search "
-      "if you're not sure) or a reminder. When it ends you say 'message' out loud. Time already spent on this "
-      "request (e.g. searching) is subtracted automatically, so give the FULL duration.",
+      "if you're not sure), a reminder, or to DO something later (\"za 10 sekund naciśnij spację\"). When it ends "
+      "you say 'message' and/or do 'then'. Time already spent on this request is subtracted automatically, so give "
+      "the FULL duration.",
       seconds="full duration in seconds (e.g. 300 for 5 minutes)",
       label="short name, e.g. 'Flash Xayah'",
-      message="what to say when it's done, in the user's language, e.g. 'Flash jest gotowy na Xayah!'")
-async def start_timer(seconds: float, label: str = "timer", message: str = "") -> str:
+      message="what to say when it's done, in the user's language (optional when 'then' is set)",
+      then="optional: what to do when it ends, as the user's own command, e.g. 'naciśnij spację' or "
+           "'kliknij przycisk Start'. Don't do it now; it happens when the timer ends.")
+async def start_timer(seconds: float, label: str = "timer", message: str = "", then: str = "") -> str:
     try:
         total = float(seconds)
     except (TypeError, ValueError):
@@ -75,11 +83,12 @@ async def start_timer(seconds: float, label: str = "timer", message: str = "") -
         t = TIMERS.pop(old)
         t["task"].cancel()
     tid = next(_ids)
-    TIMERS[tid] = {"label": label, "ends": started + total, "total": total, "message": message}
+    TIMERS[tid] = {"label": label, "ends": started + total, "total": total, "message": message, "then": then or ""}
     TIMERS[tid]["task"] = asyncio.get_running_loop().create_task(_ring(tid))
     _emit()
-    log.info("timer '%s' %ss (%.1fs already passed)", label, total, already)
-    return f"Timer '{label}' running: {_fmt(total - already)} left ({already:.0f}s were already used up)."
+    log.info("timer '%s' %ss (%.1fs already passed)%s", label, total, already, f", then: {then}" if then else "")
+    return (f"Timer '{label}' running: {_fmt(total - already)} left ({already:.0f}s were already used up)."
+            + (f" When it ends you will: {then}. Don't do it now." if then else ""))
 
 
 @tool("Cancel a running timer.", label="its name (or part of it), or 'all'")

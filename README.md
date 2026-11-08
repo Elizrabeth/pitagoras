@@ -25,6 +25,9 @@ Windows media session ─► now playing ─────────────
 - After copying, a setup window sets up Python and the packages. This is about 8 GB with CUDA PyTorch, so give it
   a while.
 - Start it from the desktop / Start menu shortcut (both optional).
+- **Updating:** Start menu > **Check for Pitagoras updates** (or run any newer installer). If GitHub has a newer
+  version it downloads and installs it into the same folder, keeping your brains, voices, memory, personality and
+  settings; the brain isn't downloaded again.
 - Uninstalling removes the program; it asks before deleting your brains, voices, memory and settings.
 
 **Needs:** Windows 10/11 x64, ~15 GB free, and an NVIDIA GPU (RTX, 8 GB+ VRAM recommended) for local brains, Whisper ears and voice
@@ -43,7 +46,7 @@ git clone <this repo> ; cd pitagoras
 ```
 
 `.\installer\build.ps1 -Version 1.0.0` builds the installer into `dist\` (needs Inno Setup 6.4+). Add
-`-Personality my_personality.txt` to make that personality the default (builds `...-personal.exe`, which
+`-Personal` (your current personality.txt) or `-Personality my_personality.txt` to make that personality the default (builds `...-personal.exe`, which
 `publish.ps1` never uploads).
 
 ## Using it
@@ -52,7 +55,7 @@ The character appears in the bottom-right corner.
 
 **Pitagoras.exe** starts it with no console window. It writes its output to
 `logs\pitagoras.log` (the run before is in `pitagoras.previous.log`), shows the error if Pitagoras fails to
-start, and won't start a second copy. Quit from the character's right-click menu. To rebuild the exe (e.g.
+start, and won't start a second copy. Quit from the character's right-click menu, or say "hej pitagoras, wyłącz się" ("turn yourself off"). To rebuild the exe (e.g.
 after changing your colors, for the icon): `.\launcher\build.ps1`.
 
 - **Left-click** it to open a text box and type to it.
@@ -62,10 +65,10 @@ after changing your colors, for the icon): `.\launcher\build.ps1`.
 | Menu | What it does |
 |---|---|
 | 💬 Chat / 👀 Look at my screen / ✋ Stop talking | quick actions |
-| 📺 Watch along with me | It watches the video, stream or game with you and reacts now and then. It uses a screenshot, the window title and what was *said* (PC audio → Whisper). You can also just say "watch this with me". |
+| 📺 Watch along with me | It watches the video, stream or game with you and reacts now and then. It uses a screenshot, the window title and what was *said* (PC audio → Whisper). You can also just say "watch this with me". It remembers what it saw and said, so you can ask "co miałeś na myśli?", "co się stało?" or "jaki jest wynik?". Saying "hej pitagoras" cuts into its comment. |
 | 🧠 Brain | Pick a brain: **Local** (the `brains\` folder), **LM Studio**, **Ollama**, **Claude Code** (Haiku/Sonnet/Opus) or **Custom server…**. 👁 marks brains that can see the screen. |
 | 👂 Ears | Whisper (local GPU, tiny → large-v3-turbo) · Windows speech recognition · Off. Also choose the microphone. |
-| 👁 Eyes | Off · Only when I ask · Comment every ~2/5/15 min (it glances at your screen by itself and only speaks if something is worth saying) |
+| 👁 Eyes | Off · Only when I ask · Comment every ~2/5/15 min (it glances at your screen by itself and only speaks if something is worth saying). **Which screen**: the one your mouse is on (default), the one Pitagoras is on, or always screen 1/2/…. Asking "co myślisz o tym?" / "what do you think of this?" with nothing else makes it look at that screen. |
 | 🔊 Voice | Mute (speech bubble only), Kokoro voices, Windows voices |
 | Wake word | Only answer when it hears "Pitagoras". After a spoken reply, up to 3 follow-ups work without the name. |
 | ⚙ Settings › 🌍 Language | Auto · Polski · English. Replies are always in that language, and the voice switches to one that speaks it (keeping its gender). |
@@ -78,11 +81,21 @@ after changing your colors, for the icon): `.\launcher\build.ps1`.
 
 **🎙 Voice model** (top-level menu): your RVC voice models from `voices\` (a folder with `.pth` + `.index`, or a loose `.pth`); **Rescan** after adding one. **Voice › Speed / Pitch / Volume** change the base voice *before* the voice model (volume is applied last).
 
-**Controlling the PC:** ask it to click, type or play something ("Hej Pitagoras, zagraj w FNAF"). It screenshots the active window with a coordinate grid, then clicks / presses keys / types, seeing the screen after every action (up to `control.max_steps` actions). **Move the mouse yourself to take over: it stops immediately.** Turn it off in Settings › "Let Pitagoras use mouse & keyboard". Aiming needs a good vision brain: Claude (Sonnet) is far more accurate than small local models.
+**Controlling the PC:** ask it to click, type or play something ("Hej Pitagoras, zagraj w FNAF"). It screenshots the active window with a coordinate grid, then clicks / presses keys / types, seeing the screen after every action (up to `control.max_steps` actions). Its cursor **glides** to things (never teleports) and is drawn in its own color with a "Pitagoras" tag that shows what it's typing or pressing; clicks show a ripple. While it's in control, a colored frame and a banner at the top say **"Naciśnij Esc, aby wyjść z trybu kontroli"**. **Press Esc or move the mouse yourself to take over: it stops immediately.** Cursor color: Settings › Colors › Cursor color; glide speed: `control.cursor_speed`. Turn it off in Settings › "Let Pitagoras use mouse & keyboard". Aiming needs a good vision brain: Claude (Sonnet) is far more accurate than small local models.
 
-**Timers & cooldowns:** "Hej Pitagoras, Xayah flashneła, trackuj" → it looks up the cooldown online, starts the timer from the moment you asked (search time is subtracted), shows it under the character and says "Flash jest gotowy na Xayah!" when it's up. Reminders work the same ("przypomnij mi za 10 minut…"); "anuluj timer" cancels.
+**Discord:** "Hej Pitagoras, napisz na discordzie na serwerze moja ekipa na kanale general: będę za 10 minut" (or `napisz na discordzie "serwer, kanał" "wiadomość"`, or "wyślij do Adama na discordzie, że zaraz będę"). It opens the Discord app, jumps to the channel with Ctrl+K, **checks the window really shows that channel on that server** (otherwise it sends nothing), types your message word for word + ` - Pitagoras AI`, sends it, confirms it appeared in the chat, and switches back to what you were doing. Esc stops it. Signature: `discord.signature` in `config.yaml`.
+
+**Timers & cooldowns:** "Hej Pitagoras, Xayah flashneła, trackuj" → it looks up the cooldown online, starts the timer from the moment you asked (search time is subtracted), shows it under the character and says "Flash jest gotowy na Xayah!" when it's up. Reminders work the same ("przypomnij mi za 10 minut…"); "anuluj timer" cancels. Timers can also **do** something: "ustaw timer na 10 sekund i naciśnij spację", "za minutę kliknij Start".
+
+**Looking & clicking words:** "zobacz", "zerknij (na to)", "spójrz", "rzuć okiem", "obczaj to", "co widzisz?" → it looks at the screen. "kliknij / naciśnij / wciśnij / tapnij / zaznacz …" → it takes a screenshot first and clicks what is really there; just "naciśnij" means the thing you asked it to press before. Keys ("naciśnij spację / enter") are pressed, not clicked.
+
+**Recommendations:** "poleć mi serial kryminalny", "w co zagrać na weekend?", "jaką myszkę polecasz?" → it looks up what's recommended right now (and reads the top lists) and suggests a few real titles. Other questions are checked online too (Settings › Check answers online).
+
+**Ears › My words…:** names it keeps mishearing (champions, friends, games, slang), one per line. In tests on Polish requests, a word list cut the error rate from 4.5% to 1.5%. (Whisper large-v3-turbo was the best model for Polish in those tests; the full large-v3 and a Polish-tuned model were both worse.)
 
 **⚙ Settings › 🙋 Preferences:** change the wake phrase (e.g. "hej madzia": it then also answers to that name) and set your name so it calls you by it.
+
+**YouTube & shops:** "włącz kanał Blowka" opens the channel page itself; "włącz kanał Blowka i odpal jakiś film" plays a random video from it ("…najnowszy film" the newest, "…najpopularniejszy" the most viewed, "drugi najnowszy" / "trzeci najpopularniejszy" / "przedostatni" a given place in that order); "włącz film z gry fnaf od Elevena" plays one of that YouTuber's own videos about that game (the topic also helps pick the right channel); "włącz streama xQc na twitchu" opens Twitch (Kick too); requests with several parts ("otwórz notatnik i napisz cześć") get every part done; "puść film o kotach" / "odpal jakiś filmik" starts a video right away; "znajdź najtańsze ogłoszenie iPhone 13 na OLX" opens OLX sorted cheapest first (also Allegro, Allegro Lokalnie, Vinted, Amazon, eBay, Ceneo, Otomoto, Steam). After a web search, "otwórz drugą stronę" opens that result.
 
 **Opening things:** "open steam and turn on deadlock", "launch skyrim" or "open photoshop" work because it scans the Start menu and your Steam libraries (Steam games start Steam on their own). If something isn't installed ("open netflix"), it opens the website instead.
 
