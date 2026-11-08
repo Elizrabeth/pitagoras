@@ -45,5 +45,9 @@ Needs Windows 10/11 x64, ~15 GB free, and an NVIDIA GPU for local brains and fas
 Windows SmartScreen may warn because the installer isn't code-signed: **More info → Run anyway**.
 "@
 if ($Changes) { $notes = "## What's new`n`n$Changes`n`n$notes" }
-& $gh release create "v$Version" $installer --repo "$login/$Repo" --title "Pitagoras $Version" --notes $notes
+# notes go through a file: Windows PowerShell breaks native arguments that contain double quotes
+$notesFile = Join-Path $env:TEMP "pitagoras-notes-$Version.md"
+[IO.File]::WriteAllText($notesFile, $notes, (New-Object Text.UTF8Encoding $false))
+& $gh release create "v$Version" $installer --repo "$login/$Repo" --title "Pitagoras $Version" --notes-file $notesFile
+if ($LASTEXITCODE -ne 0) { throw "creating the release failed" }
 Write-Host "`nDone: https://github.com/$login/$Repo" -ForegroundColor Green
